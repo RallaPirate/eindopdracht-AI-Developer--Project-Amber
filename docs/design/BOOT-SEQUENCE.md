@@ -133,7 +133,7 @@ Loading desktop environment.............................OK
 
 
 
-System ready.
+System Ready.
 ```
 
 ---
