@@ -1,0 +1,56 @@
+---
+description: Component architecture and composition rules for the application.
+alwaysApply: true
+---
+
+# Application architecture
+
+The user-facing application consists of three primary pages: a login page, a register page, and a single-page faux desktop interface.
+
+The main application is displayed at the root route. Individual application features are presented as programs running inside the desktop interface rather than as separate conventional web pages. Authentication-related routes are exceptions to the single-page desktop architecture.
+
+Examples include:
+
+- assistant.exe
+- reports.exe
+- species_database.exe
+- personnel.exe
+- archive.exe
+
+Names ending in `.exe` are user-facing program labels. Use conventional TypeScript and React naming for files, components and identifiers.
+
+Implement these features as React components that are rendered within the main desktop page.
+
+Do not create a separate route or `page.tsx` for an individual desktop program unless explicitly requested.
+
+# Desktop programs
+
+Each desktop program should behave visually and functionally like a window within the faux operating system, inspired by the workings of mid-'90s operating systems.
+
+- Program content should remain separate from the desktop shell.
+- Opening and closing a program should normally be handled through application state rather than route navigation.
+- Different programs may have different initial dimensions, positions and behaviour where appropriate.
+- Do not assume that every program requires exactly the same layout or controls.
+- Reuse shared window behaviour and presentation where this is practical, but do not force unrelated programs into an unsuitable abstraction.
+
+# Component responsibilities
+
+- Keep components focused on a clear responsibility.
+- Separate reusable interface structure from feature-specific content and logic.
+- Prefer composition over large components with many unrelated responsibilities.
+- Avoid duplicating shared desktop or window behaviour.
+- Do not place the complete application implementation directly inside `src/app/page.tsx`. Compose the page from separate imported components. 
+
+The root page should primarily assemble the desktop interface and its major components.
+
+# Extending the application
+
+When adding a new desktop program:
+
+- integrate it into the existing desktop architecture;
+- follow established component and state-management patterns;
+- avoid introducing a parallel navigation or routing system;
+- reuse existing shared components where suitable;
+- do not create speculative components for functionality that has not yet been requested.
+
+If the existing architecture does not support a requested feature cleanly, explain the limitation before introducing a new pattern.

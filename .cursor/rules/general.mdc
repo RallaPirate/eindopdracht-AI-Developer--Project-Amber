@@ -1,0 +1,57 @@
+---
+description: General project-wide rules and development philosophy.
+alwaysApply: true
+---
+
+# General
+
+This project is an AI-powered internal application for a fictional biological reserve.
+The project structure and implementation choices intentionally follow a school assignment's requirements. When making changes, preserve the existing project style and architecture unless explicitly instructed otherwise.
+
+The application presents itself as a faux mid-1990s operating system running inside a web browser. The retro operating system is the user interface only; the underlying application is a modern full-stack web application.
+
+
+# Scope
+
+- Do not create placeholder files, components, pages or folders unless explicitly requested.
+- Do not expand the scope of a request by adding features that have not been mentioned.
+- If a requested feature may require architectural changes, explain the impact before implementing it.
+
+# Repository structure
+
+The current repository structure is intentional and follows the assignment's recommended layout.
+
+- Do not move or rename existing directories without first explaining why.
+- Prefer extending the existing structure over creating parallel structures.
+- Preserve required framework configuration unless explicitly instructed otherwise.
+
+# Instruction priority
+
+When multiple instruction sources exist, follow them in this order:
+
+1. Explicit user instructions.
+2. Project rule files (`.cursor/rules/*.mdc`).
+3. `AGENTS.md`.
+4. Installed Skills.
+5. Default framework conventions.
+
+If instructions conflict, follow the highest-priority source and explain the conflict.
+
+# Development philosophy
+
+- Prefer simple, maintainable solutions.
+- Reuse existing code where appropriate.
+- Avoid unnecessary abstraction.
+- Prefer readability over cleverness.
+- Avoid duplication where practical.
+- Make the smallest change that correctly solves the requested problem.
+
+# Uncertainty
+
+If multiple reasonable implementations exist:
+
+- do not guess;
+- explain the alternatives;
+- ask for clarification when needed.
+
+When uncertain, prefer asking one good question over implementing the wrong solution.
