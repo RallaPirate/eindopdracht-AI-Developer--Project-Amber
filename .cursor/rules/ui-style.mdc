@@ -1,3 +1,83 @@
 ---
+description: Visual style and user interface rules for BioReserve OS.
 alwaysApply: true
 ---
+
+# Visual identity
+
+BioReserve OS is inspired by professional desktop operating systems from the mid-1990s.
+
+The objective is not to recreate Windows 95 exactly, but to create a believable fictional operating system that could plausibly have existed during that period drawing inspiration from the Windows 95 user interface.
+
+Preserve the retro visual identity even when modern design conventions would normally suggest alternative styling.
+
+Avoid introducing modern SaaS aesthetics.
+
+# Colour palette
+
+Use a consistent colour palette throughout the application.
+
+Preferred colours:
+
+- Window background: dark graphite (`#3A3737`)
+- Taskbar: dark graphite (`#3A3737`)
+- Primary text: warm off-white (`#FAF6ED`)
+- Accent colour: muted grey-green
+- Title bars: deep saturated blue
+- Borders: dark graphite
+
+The desktop background uses a custom wallpaper rather than a solid colour.
+
+Do not introduce bright modern accent colours unless explicitly requested.
+
+# Windows
+
+Desktop programs should appear and behave as movable operating-system windows.
+
+Windows should:
+
+- have crisp rectangular borders;
+- use subtle bevelled edges to suggest depth;
+- clearly distinguish title bars from content;
+- be greyed out when inactive;
+- display a close ('X') button in the top-right corner of the title bar;
+- remain visually consistent throughout the application.
+
+Different applications may have different default sizes where appropriate.
+
+# Controls
+
+Buttons, inputs and controls should reflect the visual language of mid-1990s desktop software.
+
+Prefer:
+
+- rectangular controls;
+- subtle bevel effects;
+- restrained colour usage;
+- compact spacing.
+
+Avoid:
+
+- rounded corners;
+- glass effects;
+- transparency;
+- floating panels;
+- oversized controls;
+- excessive whitespace.
+
+# Icons
+
+Icons should:
+
+- follow a pixel-art inspired design language;
+- remain simple and immediately recognisable;
+- use a restrained colour palette;
+- visually resemble classic desktop application icons.
+
+# Overall atmosphere
+
+The interface should feel professional, practical and authentic.
+
+It should resemble software designed for everyday operational use rather than a nostalgic parody of 1990s computing.
+
+When visual authenticity and modern UI conventions conflict, prefer authenticity unless usability would be significantly reduced.
