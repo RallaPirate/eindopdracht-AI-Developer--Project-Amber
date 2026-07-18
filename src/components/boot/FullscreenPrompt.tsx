@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useEffect } from "react";
 import { Win95Button } from "@/components/ui/Win95Button";
 
 type FullscreenPromptProps = {
@@ -7,14 +8,35 @@ type FullscreenPromptProps = {
 };
 
 export function FullscreenPrompt({ onContinue }: FullscreenPromptProps) {
-  async function enterFullscreen() {
+  const enterFullscreen = useCallback(async () => {
     try {
       await document.documentElement.requestFullscreen();
     } catch {
       // Browser may deny fullscreen; continue anyway.
     }
     onContinue();
-  }
+  }, [onContinue]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!event.altKey) return;
+
+      const key = event.key.toLowerCase();
+      if (key === "e") {
+        event.preventDefault();
+        void enterFullscreen();
+        return;
+      }
+
+      if (key === "c") {
+        event.preventDefault();
+        onContinue();
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [enterFullscreen, onContinue]);
 
   return (
     <div className="flex h-full w-full items-center justify-center bg-black px-4">
@@ -29,8 +51,12 @@ export function FullscreenPrompt({ onContinue }: FullscreenPromptProps) {
             BioReserve OS is designed to run in fullscreen mode.
           </p>
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
-            <Win95Button onClick={enterFullscreen}>Enter Fullscreen</Win95Button>
-            <Win95Button onClick={onContinue}>Continue Windowed</Win95Button>
+            <Win95Button underlinedChar="E" onClick={enterFullscreen}>
+              Enter Fullscreen
+            </Win95Button>
+            <Win95Button underlinedChar="C" onClick={onContinue}>
+              Continue Windowed
+            </Win95Button>
           </div>
         </div>
       </div>

@@ -26,8 +26,8 @@ export function DesktopLoading({ onComplete }: DesktopLoadingProps) {
         style={{ objectFit: "fill" }}
       />
 
-      <div className="absolute bottom-10 left-1/2 w-[min(420px,80vw)] -translate-x-1/2">
-        <div className="os-bevel-in h-5 w-full bg-black p-[2px]">
+      <div className="absolute bottom-10 left-1/2 w-[min(800px,80vw)] -translate-x-1/2">
+        <div className="os-bevel-in h-7 w-full bg-black p-[2px]">
           <div
             className="os-loading-bar-fill h-full bg-[var(--os-loading-bar)]"
             onAnimationEnd={handleComplete}
