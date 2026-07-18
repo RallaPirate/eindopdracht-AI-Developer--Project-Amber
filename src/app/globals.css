@@ -1,26 +1,105 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --os-graphite: #3a3737;
+  --os-text: #faf6ed;
+  --os-titlebar: #000080;
+  --os-titlebar-inactive: #808080;
+  --os-accent: #6b7f6b;
+  --os-border-light: #dfdfdf;
+  --os-border-dark: #0a0a0a;
+  --os-border-shadow: #808080;
+  --os-button-face: #c0c0c0;
+  --os-button-text: #000000;
+  --os-window-face: #c0c0c0;
+  --os-input-bg: #ffffff;
+  --os-disabled: #808080;
+  --os-loading-bar: #1a4d1a;
+  --background: #000000;
+  --foreground: #faf6ed;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-os);
+  --font-mono: var(--font-boot);
+  --font-boot: var(--font-boot);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-os), "MS Sans Serif", Tahoma, sans-serif;
+}
+
+button,
+input {
+  font-family: inherit;
+}
+
+/* Win95 bevel helpers */
+.os-bevel-out {
+  border-top: 2px solid var(--os-border-light);
+  border-left: 2px solid var(--os-border-light);
+  border-right: 2px solid var(--os-border-dark);
+  border-bottom: 2px solid var(--os-border-dark);
+  box-shadow:
+    inset -1px -1px 0 var(--os-border-shadow),
+    inset 1px 1px 0 #ffffff;
+}
+
+.os-bevel-in {
+  border-top: 2px solid var(--os-border-dark);
+  border-left: 2px solid var(--os-border-dark);
+  border-right: 2px solid var(--os-border-light);
+  border-bottom: 2px solid var(--os-border-light);
+  box-shadow:
+    inset 1px 1px 0 var(--os-border-shadow),
+    inset -1px -1px 0 #ffffff;
+}
+
+.os-bevel-button {
+  border-top: 2px solid var(--os-border-light);
+  border-left: 2px solid var(--os-border-light);
+  border-right: 2px solid var(--os-border-dark);
+  border-bottom: 2px solid var(--os-border-dark);
+  background: var(--os-button-face);
+  color: var(--os-button-text);
+}
+
+.os-bevel-button:active:not(:disabled) {
+  border-top: 2px solid var(--os-border-dark);
+  border-left: 2px solid var(--os-border-dark);
+  border-right: 2px solid var(--os-border-light);
+  border-bottom: 2px solid var(--os-border-light);
+}
+
+.os-bevel-button:disabled {
+  color: var(--os-disabled);
+  text-shadow: 1px 1px 0 #ffffff;
+}
+
+@keyframes loading-bar-fill {
+  from {
+    width: 0%;
+  }
+  to {
+    width: 100%;
+  }
+}
+
+.os-loading-bar-fill {
+  animation: loading-bar-fill 3.5s linear forwards;
 }
