@@ -24,9 +24,9 @@ export function DesktopIcon({
       <img
         src={iconSrc}
         alt={iconAlt}
-        width={32}
-        height={32}
-        className="h-8 w-8 object-contain drop-shadow-[1px_1px_0_rgba(0,0,0,0.6)]"
+        width={64}
+        height={64}
+        className="h-16 w-16 object-contain drop-shadow-[1px_1px_0_rgba(0,0,0,0.6)]"
         draggable={false}
       />
       <span className="line-clamp-2 text-xs leading-tight [text-shadow:1px_1px_0_#000]">

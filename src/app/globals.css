@@ -6,12 +6,12 @@
   --os-titlebar: #000080;
   --os-titlebar-inactive: #808080;
   --os-accent: #6b7f6b;
-  --os-border-light: #dfdfdf;
+  --os-border-light: #6b6868;
   --os-border-dark: #0a0a0a;
-  --os-border-shadow: #808080;
-  --os-button-face: #c0c0c0;
-  --os-button-text: #000000;
-  --os-window-face: #c0c0c0;
+  --os-border-shadow: #232121;
+  --os-button-face: #474343;
+  --os-button-text: #faf6ed;
+  --os-window-face: #474343;
   --os-input-bg: #ffffff;
   --os-disabled: #808080;
   --os-loading-bar: #1a4d1a;
@@ -57,7 +57,7 @@ input {
   border-bottom: 2px solid var(--os-border-dark);
   box-shadow:
     inset -1px -1px 0 var(--os-border-shadow),
-    inset 1px 1px 0 #ffffff;
+    inset 1px 1px 0 #787575;
 }
 
 .os-bevel-in {
@@ -67,7 +67,7 @@ input {
   border-bottom: 2px solid var(--os-border-light);
   box-shadow:
     inset 1px 1px 0 var(--os-border-shadow),
-    inset -1px -1px 0 #ffffff;
+    inset -1px -1px 0 #787575;
 }
 
 .os-bevel-button {
