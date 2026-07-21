@@ -1,15 +1,62 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { isAuthRetryableFetchError } from "@supabase/supabase-js";
 import { Win95Button } from "@/components/ui/Win95Button";
+import { getSupabaseBrowserClient } from "@/lib/supabase";
+
+const INVALID_CREDENTIALS_MESSAGE = "Invalid email address or password.";
+const SERVICE_UNAVAILABLE_MESSAGE =
+  "Authentication service unavailable. Please try again.";
 
 type LoginDialogProps = {
   onExecute: (email: string) => void;
+  onCreateUser: () => void;
 };
 
-export function LoginDialog({ onExecute }: LoginDialogProps) {
+export function LoginDialog({ onExecute, onCreateUser }: LoginDialogProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
+
+  async function attemptLogin() {
+    if (isSubmittingRef.current) return;
+
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !password) {
+      return;
+    }
+
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
+    setError(null);
+
+    try {
+      const supabase = getSupabaseBrowserClient();
+      const { data, error: authError } = await supabase.auth.signInWithPassword({
+        email: trimmedEmail,
+        password,
+      });
+
+      if (authError) {
+        setError(
+          isAuthRetryableFetchError(authError)
+            ? SERVICE_UNAVAILABLE_MESSAGE
+            : INVALID_CREDENTIALS_MESSAGE,
+        );
+        return;
+      }
+
+      onExecute(data.user?.email ?? trimmedEmail);
+    } catch {
+      setError(SERVICE_UNAVAILABLE_MESSAGE);
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+    }
+  }
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -18,19 +65,21 @@ export function LoginDialog({ onExecute }: LoginDialogProps) {
       const key = event.key.toLowerCase();
       if (key === "c") {
         event.preventDefault();
-        // Create User is intentionally a no-op in this milestone.
+        onCreateUser();
         return;
       }
 
       if (key === "e") {
         event.preventDefault();
-        onExecute(email);
+        void attemptLogin();
       }
     }
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [email, onExecute]);
+    // attemptLogin closes over latest email/password/onExecute
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [email, password, onExecute, onCreateUser]);
 
   return (
     <div className="relative flex h-full w-full items-center justify-center bg-black">
@@ -57,17 +106,18 @@ export function LoginDialog({ onExecute }: LoginDialogProps) {
           className="space-y-3 px-4 py-4"
           onSubmit={(event) => {
             event.preventDefault();
-            onExecute(email);
+            void attemptLogin();
           }}
         >
           <label className="block text-sm">
             <span className="mb-1 block">Email</span>
             <input
               type="email"
-              autoComplete="username"
+              autoComplete="email"
               value={email}
+              disabled={isSubmitting}
               onChange={(event) => setEmail(event.target.value)}
-              className="os-bevel-in w-full bg-[var(--os-input-bg)] px-2 py-1 text-sm outline-none"
+              className="os-bevel-in w-full bg-[var(--os-input-bg)] px-2 py-1 text-sm text-black outline-none disabled:cursor-default"
             />
           </label>
 
@@ -77,10 +127,17 @@ export function LoginDialog({ onExecute }: LoginDialogProps) {
               type="password"
               autoComplete="current-password"
               value={password}
+              disabled={isSubmitting}
               onChange={(event) => setPassword(event.target.value)}
-              className="os-bevel-in w-full bg-[var(--os-input-bg)] px-2 py-1 text-sm outline-none"
+              className="os-bevel-in w-full bg-[var(--os-input-bg)] px-2 py-1 text-sm text-black outline-none disabled:cursor-default"
             />
           </label>
+
+          {error ? (
+            <p className="text-sm text-[var(--os-button-text)]" role="alert">
+              {error}
+            </p>
+          ) : null}
 
           <button
             type="button"
@@ -102,13 +159,11 @@ export function LoginDialog({ onExecute }: LoginDialogProps) {
             <Win95Button
               type="button"
               underlinedChar="C"
-              onClick={() => {
-                // Create User is intentionally a no-op in this milestone.
-              }}
+              onClick={onCreateUser}
             >
               Create User
             </Win95Button>
-            <Win95Button type="submit" underlinedChar="E">
+            <Win95Button type="submit" underlinedChar="E" disabled={isSubmitting}>
               Execute
             </Win95Button>
           </div>
