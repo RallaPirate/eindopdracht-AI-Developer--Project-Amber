@@ -11,9 +11,10 @@ const SERVICE_UNAVAILABLE_MESSAGE =
 
 type LoginDialogProps = {
   onExecute: (email: string) => void;
+  onCreateUser: () => void;
 };
 
-export function LoginDialog({ onExecute }: LoginDialogProps) {
+export function LoginDialog({ onExecute, onCreateUser }: LoginDialogProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -64,7 +65,7 @@ export function LoginDialog({ onExecute }: LoginDialogProps) {
       const key = event.key.toLowerCase();
       if (key === "c") {
         event.preventDefault();
-        // Create User is intentionally a no-op in this milestone.
+        onCreateUser();
         return;
       }
 
@@ -78,7 +79,7 @@ export function LoginDialog({ onExecute }: LoginDialogProps) {
     return () => window.removeEventListener("keydown", onKeyDown);
     // attemptLogin closes over latest email/password/onExecute
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email, password, onExecute]);
+  }, [email, password, onExecute, onCreateUser]);
 
   return (
     <div className="relative flex h-full w-full items-center justify-center bg-black">
@@ -158,9 +159,7 @@ export function LoginDialog({ onExecute }: LoginDialogProps) {
             <Win95Button
               type="button"
               underlinedChar="C"
-              onClick={() => {
-                // Create User is intentionally a no-op in this milestone.
-              }}
+              onClick={onCreateUser}
             >
               Create User
             </Win95Button>

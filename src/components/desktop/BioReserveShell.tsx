@@ -5,6 +5,7 @@ import { BootSequence } from "@/components/boot/BootSequence";
 import { DesktopLoading } from "@/components/boot/DesktopLoading";
 import { FullscreenPrompt } from "@/components/boot/FullscreenPrompt";
 import { LoginDialog } from "@/components/boot/LoginDialog";
+import { RegisterDialog } from "@/components/boot/RegisterDialog";
 import { WelcomeBackDialog } from "@/components/boot/WelcomeBackDialog";
 import { Desktop } from "@/components/desktop/Desktop";
 import { Taskbar } from "@/components/desktop/Taskbar";
@@ -26,6 +27,7 @@ export type ShellPhase =
   | "boot"
   | "awaitingSession"
   | "login"
+  | "register"
   | "welcome"
   | "loading"
   | "desktop"
@@ -277,7 +279,21 @@ export function BioReserveShell() {
   }
 
   if (phase === "login") {
-    return <LoginDialog onExecute={handleExecute} />;
+    return (
+      <LoginDialog
+        onExecute={handleExecute}
+        onCreateUser={() => setPhase("register")}
+      />
+    );
+  }
+
+  if (phase === "register") {
+    return (
+      <RegisterDialog
+        onCancel={() => setPhase("login")}
+        onExecute={handleExecute}
+      />
+    );
   }
 
   if (phase === "welcome") {
