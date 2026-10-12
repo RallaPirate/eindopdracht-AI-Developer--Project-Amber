@@ -5,12 +5,12 @@ Scope: stretch functionality, RAG, custom MCP, extra polish and optional integra
 
 ### 0. Baseline and project safeguards
 
-- [ ] 0.1 Inspect repository structure, installed dependencies and lockfile.
-- [ ] 0.2 Verify the existing authentication/profile flow and desktop shell.
-- [ ] 0.3 Verify the current Supabase schema, migrations and RLS state against the locked design.
-- [ ] 0.4 Make the existing application build successfully locally.
-- [ ] 0.5 Establish a working Vercel deployment of the existing baseline.
-- [ ] 0.6 Verify/install the required Skills.sh setup, including vercel-react-best-practices.
+- [X] 0.1 Inspect repository structure, installed dependencies and lockfile.
+- [X] 0.2 Verify the existing authentication/profile flow and desktop shell.
+- [X] 0.3 Verify the current Supabase schema, migrations and RLS state against the locked design.
+- [X] 0.4 Make the existing application build successfully locally.
+- [X] 0.5 Establish a working Vercel deployment of the existing baseline.
+- [X] 0.6 Verify/install the required Skills.sh setup, including vercel-react-best-practices.
 - [ ] 0.7 Create the submission/evidence checklist: requirements, screenshots, code examples, prompts and test evidence.
 - [ ] 0.8 Confirm the Git workflow: feature branches, small commits and PRs throughout development.
 Milestone: we know exactly what exists, the baseline runs locally and on Vercel, and development can proceed without guessing.
