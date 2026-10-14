@@ -11,8 +11,8 @@ Scope: stretch functionality, RAG, custom MCP, extra polish and optional integra
 - [X] 0.4 Make the existing application build successfully locally.
 - [X] 0.5 Establish a working Vercel deployment of the existing baseline.
 - [X] 0.6 Verify/install the required Skills.sh setup, including vercel-react-best-practices.
-- [ ] 0.7 Create the submission/evidence checklist: requirements, screenshots, code examples, prompts and test evidence.
-- [ ] 0.8 Confirm the Git workflow: feature branches, small commits and PRs throughout development.
+- [X] 0.7 Create the submission/evidence checklist: requirements, screenshots, code examples, prompts and test evidence.
+- [X] 0.8 Confirm the Git workflow: feature branches, small commits and PRs throughout development.
 Milestone: we know exactly what exists, the baseline runs locally and on Vercel, and development can proceed without guessing.
 
 ### 1. Database foundation
