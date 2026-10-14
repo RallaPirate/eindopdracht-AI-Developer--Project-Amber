@@ -35,12 +35,12 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
 
 **Priority:** High — blocks task 0.5.
 
-- [ ] Identify existing disposable test accounts in Supabase Auth.
-- [ ] Replace weak passwords with strong, unique credentials or remove unnecessary test accounts.
-- [ ] Before deleting accounts, check whether any existing application records must be preserved.
-- [ ] Verify that no test credentials or secrets have been committed to GitHub.
-- [ ] Check which Supabase project the Vercel deployment will connect to.
-- [ ] Verify that the deployed application does not provide unintended access to protected data.
-- [ ] Keep credentials out of repository files, including documentation and test fixtures.
+- [X] Identify existing disposable test accounts in Supabase Auth.
+- [X] Replace weak passwords with strong, unique credentials or remove unnecessary test accounts.
+- [X] Before deleting accounts, check whether any existing application records must be preserved.
+- [X] Verify that no test credentials or secrets have been committed to GitHub.
+- [X] Check which Supabase project the Vercel deployment will connect to.
+- [X] Verify that the deployed application does not provide unintended access to protected data.
+- [X] Keep credentials out of repository files, including documentation and test fixtures.
 
 **Completion criterion:** No publicly accessible deployment relies on known weak test credentials.

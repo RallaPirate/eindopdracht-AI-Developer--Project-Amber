@@ -63,7 +63,7 @@ export async function enrichDisplayName(userId: string): Promise<string | null> 
     const { data, error } = await supabase
       .from("profiles")
       .select("display_name")
-      .eq("id", userId)
+      .eq("auth_user_id", userId)
       .maybeSingle();
 
     if (error || !data) {
