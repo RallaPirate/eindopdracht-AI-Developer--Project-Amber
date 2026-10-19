@@ -12,6 +12,14 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   - Likely cause: `Taskbar.tsx` sorts windows by `zIndex`.
   - Verify after fixing: opening, focusing and closing several windows preserves the expected taskbar behaviour.
 
+  - [ ] **AUTH-UI-01 — Profile display name intermittently falls back to email.**
+  - Observed during task 1.1 verification: a newly registered employee had the correct `profiles.display_name` in Supabase, but the UI initially displayed the email address instead.
+  - Expected: the UI displays `profiles.display_name` after the authenticated profile lookup succeeds.
+  - Current status: unreproducible after 24 hours; the correct display name now appears in both local development and production.
+  - Root cause unknown; no functional fix applied.
+  - If the issue recurs, inspect the `enrichDisplayName()` query result, Supabase errors and asynchronous UI updates.
+  - Verify after fixing: correct display name after registration, login, refresh and session restoration.
+
 ## Authentication improvements
 
 - [ ] **AUTH-01 — Session verification errors have no recovery UI.**
@@ -28,6 +36,7 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
 - Address them at an appropriate point in the implementation schedule.
 - Do not implement unrelated changes while completing an existing checklist task.
 - Mark items complete only after verifying the expected behaviour.
+
 
 
 

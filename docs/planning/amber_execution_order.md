@@ -17,8 +17,8 @@ Milestone: we know exactly what exists, the baseline runs locally and on Vercel,
 
 ### 1. Database foundation
 
-- [ ] 1.1 Implement/align profiles and permanent profile ↔ Auth identity handling.
-- [ ] 1.2 Implement/align species_database.
+- [X] 1.1 Implement/align profiles and permanent profile ↔ Auth identity handling.
+- [X] 1.2 Implement/align species_database.
 - [ ] 1.3 Implement/align specimens.
 - [ ] 1.4 Implement/align reports.
 - [ ] 1.5 Implement/align species_knowledge_index.
