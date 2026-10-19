@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isAuthRetryableFetchError, type User } from "@supabase/supabase-js";
 import { Win95Button } from "@/components/ui/Win95Button";
+import { getEmailConfirmRedirectUrl } from "@/lib/authReturn";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -117,6 +118,9 @@ export function RegisterDialog({ onCancel, onExecute }: RegisterDialogProps) {
       const { data, error: authError } = await supabase.auth.signUp({
         email: trimmedEmail,
         password,
+        options: {
+          emailRedirectTo: getEmailConfirmRedirectUrl(),
+        },
       });
 
       if (authError) {

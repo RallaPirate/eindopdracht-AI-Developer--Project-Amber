@@ -19,6 +19,14 @@ import {
   writeSoundEnabled,
   type LocalePreference,
 } from "@/lib/preferences";
+import {
+  consumeEmailConfirmError,
+  consumeFreshAuth,
+  consumeOAuthError,
+  EMAIL_CONFIRM_ERROR_MESSAGE,
+  FRESH_AUTH_SESSION_ERROR_MESSAGE,
+  GOOGLE_SIGN_IN_ERROR_MESSAGE,
+} from "@/lib/authReturn";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 import { enrichDisplayName, resolveAuthSession } from "@/lib/sessionUser";
 
@@ -86,6 +94,9 @@ export function BioReserveShell() {
   const [sessionCheckId, setSessionCheckId] = useState(0);
   const [authErrorMessage, setAuthErrorMessage] = useState<string | null>(null);
   const [signOutError, setSignOutError] = useState<string | null>(null);
+  const [authReturnReady, setAuthReturnReady] = useState(false);
+  const [freshAuthReturnPending, setFreshAuthReturnPending] = useState(false);
+  const [loginInitialError, setLoginInitialError] = useState<string | null>(null);
 
   const sessionStatusRef = useRef(sessionStatus);
   const currentUserRef = useRef(currentUser);
@@ -116,9 +127,72 @@ export function BioReserveShell() {
   const startBootCycle = useCallback(() => {
     setSignOutError(null);
     setAuthErrorMessage(null);
+    setFreshAuthReturnPending(false);
     setSessionStatus("pending");
     setSessionCheckId((id) => id + 1);
     setPhase("boot");
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      if (consumeOAuthError()) {
+        if (cancelled) return;
+        setLoginInitialError(GOOGLE_SIGN_IN_ERROR_MESSAGE);
+        setSessionStatus("anonymous");
+        setPhase("login");
+        setAuthReturnReady(true);
+        return;
+      }
+
+      if (consumeEmailConfirmError()) {
+        if (cancelled) return;
+        setLoginInitialError(EMAIL_CONFIRM_ERROR_MESSAGE);
+        setSessionStatus("anonymous");
+        setPhase("login");
+        setAuthReturnReady(true);
+        return;
+      }
+
+      if (consumeFreshAuth()) {
+        const result = await resolveAuthSession();
+        if (cancelled) return;
+
+        if (result.status !== "authenticated") {
+          setLoginInitialError(FRESH_AUTH_SESSION_ERROR_MESSAGE);
+          setSessionStatus("anonymous");
+          setPhase("login");
+          setAuthReturnReady(true);
+          return;
+        }
+
+        setSessionStatus("authenticated");
+        setCurrentUser(result.displayName);
+        setAuthErrorMessage(null);
+
+        void enrichDisplayName(result.user.id).then((name) => {
+          if (cancelled || !name) return;
+          setCurrentUser(name);
+        });
+
+        if (document.fullscreenElement) {
+          setPhase("loading");
+        } else {
+          setFreshAuthReturnPending(true);
+          setPhase("fullscreen");
+        }
+
+        setAuthReturnReady(true);
+        return;
+      }
+
+      setAuthReturnReady(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const branchAfterSessionResolved = useCallback(() => {
@@ -195,6 +269,7 @@ export function BioReserveShell() {
 
   const handleExecute = useCallback((email: string) => {
     setSignOutError(null);
+    setLoginInitialError(null);
     setSessionStatus("authenticated");
     setCurrentUser(displayNameFromEmail(email));
     setPhase("loading");
@@ -254,8 +329,21 @@ export function BioReserveShell() {
     writeSoundEnabled(!readSoundEnabled());
   }, []);
 
+  const handleFreshAuthContinue = useCallback(() => {
+    setFreshAuthReturnPending(false);
+    setPhase("loading");
+  }, []);
+
+  if (!authReturnReady) {
+    return <div className="h-full w-full bg-black" aria-busy="true" />;
+  }
+
   if (phase === "fullscreen") {
-    return <FullscreenPrompt onContinue={startBootCycle} />;
+    return (
+      <FullscreenPrompt
+        onContinue={freshAuthReturnPending ? handleFreshAuthContinue : startBootCycle}
+      />
+    );
   }
 
   if (phase === "boot") {
@@ -281,8 +369,12 @@ export function BioReserveShell() {
   if (phase === "login") {
     return (
       <LoginDialog
+        initialError={loginInitialError}
         onExecute={handleExecute}
-        onCreateUser={() => setPhase("register")}
+        onCreateUser={() => {
+          setLoginInitialError(null);
+          setPhase("register");
+        }}
       />
     );
   }
