@@ -19,8 +19,8 @@ Milestone: we know exactly what exists, the baseline runs locally and on Vercel,
 
 - [X] 1.1 Implement/align profiles and permanent profile ↔ Auth identity handling.
 - [X] 1.2 Implement/align species_database.
-- [ ] 1.3 Implement/align specimens.
-- [ ] 1.4 Implement/align reports.
+- [X] 1.3 Implement/align specimens.
+- [X] 1.4 Implement/align reports.
 - [ ] 1.5 Implement/align species_knowledge_index.
 - [ ] 1.6 Implement/align species_knowledge_sources.
 - [ ] 1.7 Implement required foreign keys, constraints, indexes, timestamps and audit fields.
