@@ -22,7 +22,7 @@ Milestone: we know exactly what exists, the baseline runs locally and on Vercel,
 - [X] 1.3 Implement/align specimens.
 - [X] 1.4 Implement/align reports.
 - [X] 1.5 Implement/align species_knowledge_index.
-- [ ] 1.6 Implement/align species_knowledge_sources.
+- [X] 1.6 Implement/align species_knowledge_sources.
 - [ ] 1.7 Implement required foreign keys, constraints, indexes, timestamps and audit fields.
 - [ ] 1.8 Implement database constraints for valid report lifecycle field/state combinations.
 - [ ] 1.9 Implement report transition and post-submission immutability enforcement.
@@ -75,7 +75,7 @@ The course reference specifically gives us the streamText + tools + Zod inputSch
 - [ ] 5.1 Implement the Senior/Management submitted-report review queue.
 - [ ] 5.2 Implement report opening with role-aware access.
 - [ ] 5.3 Implement approve → reviewed/active.
-- [ ] 5.4 Implement reject/withdraw through the controlled withdrawal workflow: update the report state, remove its species_knowledge_sources links and mark every affected knowledge entry pending in one database transaction, retaining the entries' guidance and remaining source links.
+- [ ] 5.4 Implement reject/withdraw through the controlled withdrawal workflow: update the report state, remove its species_knowledge_sources links and mark every affected knowledge entry pending in one database transaction, retaining the entries' guidance and remaining source links. Ensure the controlled withdrawal workflow sets reports.updated_by to the acting user's permanent profiles.id, and verify that the withdrawal trigger propagates that identity to every affected knowledge entry.
 - [ ] 5.5 Implement request-for-management-review.
 - [ ] 5.6 Enforce Management-only review of flagged submitted/active reports; the flag restricts Senior review/withdrawal only while the report remains submitted.
 - [ ] 5.7 Implement Management archive.
