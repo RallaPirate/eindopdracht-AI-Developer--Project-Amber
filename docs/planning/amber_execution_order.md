@@ -23,8 +23,8 @@ Milestone: we know exactly what exists, the baseline runs locally and on Vercel,
 - [X] 1.4 Implement/align reports.
 - [X] 1.5 Implement/align species_knowledge_index.
 - [X] 1.6 Implement/align species_knowledge_sources.
-- [ ] 1.7 Implement required foreign keys, constraints, indexes, timestamps and audit fields.
-- [ ] 1.8 Implement database constraints for valid report lifecycle field/state combinations.
+- [X] 1.7 Implement required foreign keys, constraints, indexes, timestamps and audit fields.
+- [X] 1.8 Implement database constraints for valid report lifecycle field/state combinations.
 - [ ] 1.9 Implement report transition and post-submission immutability enforcement.
 - [ ] 1.10 Implement management-review flag invariants and preservation of its historical requester/timestamp metadata.
 - [ ] 1.11 Apply the locked RLS permissions for all six application tables.
