@@ -17,18 +17,18 @@ Milestone: we know exactly what exists, the baseline runs locally and on Vercel,
 
 ### 1. Database foundation
 
-- [ ] 1.1 Implement/align profiles and permanent profile ↔ Auth identity handling.
-- [ ] 1.2 Implement/align species_database.
-- [ ] 1.3 Implement/align specimens.
-- [ ] 1.4 Implement/align reports.
-- [ ] 1.5 Implement/align species_knowledge_index.
-- [ ] 1.6 Implement/align species_knowledge_sources.
-- [ ] 1.7 Implement required foreign keys, constraints, indexes, timestamps and audit fields.
-- [ ] 1.8 Implement database constraints for valid report lifecycle field/state combinations.
-- [ ] 1.9 Implement report transition and post-submission immutability enforcement.
-- [ ] 1.10 Implement management-review flag invariants and preservation of its historical requester/timestamp metadata.
-- [ ] 1.11 Apply the locked RLS permissions for all six application tables.
-- [ ] 1.12 Verify the critical role/operation matrix for Employee, Senior and Management across all six application tables, including important field-level and lifecycle restrictions.
+- [X] 1.1 Implement/align profiles and permanent profile ↔ Auth identity handling.
+- [X] 1.2 Implement/align species_database.
+- [X] 1.3 Implement/align specimens.
+- [X] 1.4 Implement/align reports.
+- [X] 1.5 Implement/align species_knowledge_index.
+- [X] 1.6 Implement/align species_knowledge_sources.
+- [X] 1.7 Implement required foreign keys, constraints, indexes, timestamps and audit fields.
+- [X] 1.8 Implement database constraints for valid report lifecycle field/state combinations.
+- [X] 1.9 Implement report transition and post-submission immutability enforcement.
+- [X] 1.10 Implement management-review flag invariants and preservation of its historical requester/timestamp metadata.
+- [X] 1.11 Apply the locked RLS permissions for all six application tables.
+- [X] 1.12 Verify the critical role/operation matrix for Employee, Senior and Management across all six application tables, including important field-level and lifecycle restrictions.
 This follows the locked design's principle that authenticated access is role/permission constrained and that controlled workflows do not imply unrestricted table writes.    database_design_v2
 **Milestone:** the database can safely support application development.
 
@@ -75,7 +75,7 @@ The course reference specifically gives us the streamText + tools + Zod inputSch
 - [ ] 5.1 Implement the Senior/Management submitted-report review queue.
 - [ ] 5.2 Implement report opening with role-aware access.
 - [ ] 5.3 Implement approve → reviewed/active.
-- [ ] 5.4 Implement reject/withdraw through the controlled withdrawal workflow: update the report state, remove its species_knowledge_sources links and mark every affected knowledge entry pending in one database transaction, retaining the entries' guidance and remaining source links.
+- [ ] 5.4 Implement reject/withdraw through the controlled withdrawal workflow: update the report state, remove its species_knowledge_sources links and mark every affected knowledge entry pending in one database transaction, retaining the entries' guidance and remaining source links. Ensure the controlled withdrawal workflow sets reports.updated_by to the acting user's permanent profiles.id, and verify that the withdrawal trigger propagates that identity to every affected knowledge entry.
 - [ ] 5.5 Implement request-for-management-review.
 - [ ] 5.6 Enforce Management-only review of flagged submitted/active reports; the flag restricts Senior review/withdrawal only while the report remains submitted.
 - [ ] 5.7 Implement Management archive.
