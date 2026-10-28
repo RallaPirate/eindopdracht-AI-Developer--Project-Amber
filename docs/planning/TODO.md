@@ -53,3 +53,17 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
 - [X] Keep credentials out of repository files, including documentation and test fixtures.
 
 **Completion criterion:** No publicly accessible deployment relies on known weak test credentials.
+
+
+### SEC-02 — Enforce authorisation in privileged server-side database operations
+
+**Applies to:** Sections 3–4 and all subsequent controlled workflows using privileged database access.
+
+- [ ] Prefer authenticated, user-scoped Supabase operations where practical.
+- [ ] Whenever `service_role` or another privileged database context is required, verify the authenticated caller's linked profile and permissions server-side before writing.
+- [ ] Explicitly enforce the relevant role, ownership, field-level and workflow restrictions from `database_design_v2.md` that privileged access would otherwise bypass through RLS.
+- [ ] Ensure `updated_by` records the acting user's permanent `profiles.id` for authorised user-initiated changes.
+- [ ] Test unauthorised operations, including insufficient roles and attempts to modify restricted fields or records.
+- [ ] Verify that rejected operations do not persist unauthorised changes.
+
+**Completion criterion:** All privileged server-side write workflows enforce the authenticated user's permissions, preserve audit-field integrity and reject unauthorised changes, even when RLS is bypassed.
