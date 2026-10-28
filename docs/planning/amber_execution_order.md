@@ -28,7 +28,7 @@ Milestone: we know exactly what exists, the baseline runs locally and on Vercel,
 - [X] 1.9 Implement report transition and post-submission immutability enforcement.
 - [X] 1.10 Implement management-review flag invariants and preservation of its historical requester/timestamp metadata.
 - [X] 1.11 Apply the locked RLS permissions for all six application tables.
-- [ ] 1.12 Verify the critical role/operation matrix for Employee, Senior and Management across all six application tables, including important field-level and lifecycle restrictions.
+- [X] 1.12 Verify the critical role/operation matrix for Employee, Senior and Management across all six application tables, including important field-level and lifecycle restrictions.
 This follows the locked design's principle that authenticated access is role/permission constrained and that controlled workflows do not imply unrestricted table writes.    database_design_v2
 **Milestone:** the database can safely support application development.
 
