@@ -67,3 +67,15 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
 - [ ] Verify that rejected operations do not persist unauthorised changes.
 
 **Completion criterion:** All privileged server-side write workflows enforce the authenticated user's permissions, preserve audit-field integrity and reject unauthorised changes, even when RLS is bypassed.
+
+
+### REPORT-OVERVIEW-01 — Combine RLS reads with status-only sealed/withdrawn overview
+
+**Applies to:** Execution-order steps 4.11 and 5.9 (author report overview UI / data layer).
+
+- [ ] Build the author overview from two sources only: (1) ordinary reports the author may read through normal RLS-protected `reports` queries; (2) the author’s own sealed/withdrawn rows via the restricted overview RPC (`id` + `record_status` only).
+- [ ] Do not fetch or display confidential fields for sealed/withdrawn reports; do not attempt unrestricted `SELECT` of those rows for non-Management (or for withdrawn for any role).
+- [ ] Do not include reports authored by other users in the author overview.
+- [ ] Keep sealed/withdrawn entries non-clickable in the UI as specified in `database_design_v2.md`.
+
+**Completion criterion:** The overview lists the author’s accessible reports plus UUID/status-only sealed and withdrawn references, without leaking confidential report contents or other authors’ reports.
