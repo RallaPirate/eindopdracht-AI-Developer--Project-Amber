@@ -48,6 +48,16 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
 - Mark items complete only after verifying the expected behaviour.
 
 
+- [ ] TECH: Verify TanStack Query cache isolation
+  across all authentication state changes, including
+  session restoration, expiry, logout, account switching
+  and unexpected sign-out.
+  Ensure authenticated query keys include the verified
+  user identity, and pending requests cannot repopulate
+  another user's cache.
+  Complete before introducing private cached queries.
+
+
 
 
 ### SEC-01 — Replace insecure development credentials before Vercel deployment
