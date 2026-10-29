@@ -54,6 +54,38 @@ export function isAppResultOk<T>(
   return result.ok;
 }
 
+const APP_ERROR_CODES: readonly AppErrorCode[] = [
+  "validation",
+  "unauthenticated",
+  "unauthorized",
+  "not_found",
+  "conflict",
+  "database",
+  "unexpected",
+];
+
+function isAppErrorCode(value: unknown): value is AppErrorCode {
+  return (
+    typeof value === "string" &&
+    (APP_ERROR_CODES as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Deterministic display text for a recognised AppError.
+ * Never trusts an arbitrary accompanying message, except the exact
+ * unlinked-profile string paired with `unauthorized`.
+ */
+function sanitiseAppError(error: AppError): AppError {
+  const message =
+    error.code === "unauthorized" &&
+    error.message === SAFE_ERROR_MESSAGES.unlinked
+      ? SAFE_ERROR_MESSAGES.unlinked
+      : SAFE_ERROR_MESSAGES[error.code];
+
+  return { code: error.code, message };
+}
+
 /**
  * Error class for TanStack Query / local throw sites.
  * Prefer returning plain `AppResult` across Server Action boundaries.
@@ -63,10 +95,11 @@ export class AppFailure extends Error {
   readonly appError: AppError;
 
   constructor(error: AppError) {
-    super(error.message);
+    const sanitised = sanitiseAppError(error);
+    super(sanitised.message);
     this.name = "AppFailure";
-    this.code = error.code;
-    this.appError = error;
+    this.code = sanitised.code;
+    this.appError = sanitised;
   }
 }
 
@@ -80,19 +113,7 @@ export function isAppError(value: unknown): value is AppError {
   }
   const candidate = value as { code?: unknown; message?: unknown };
   return (
-    typeof candidate.code === "string" &&
-    typeof candidate.message === "string" &&
-    (
-      [
-        "validation",
-        "unauthenticated",
-        "unauthorized",
-        "not_found",
-        "conflict",
-        "database",
-        "unexpected",
-      ] as string[]
-    ).includes(candidate.code)
+    isAppErrorCode(candidate.code) && typeof candidate.message === "string"
   );
 }
 
@@ -107,10 +128,10 @@ export function unwrapAppResult<T>(result: AppResult<T>): T {
 /** Safe UI/Agent message from thrown values or plain `AppError` objects. */
 export function toUserMessage(error: unknown): string {
   if (isAppFailure(error)) {
-    return error.appError.message;
+    return sanitiseAppError(error.appError).message;
   }
   if (isAppError(error)) {
-    return error.message;
+    return sanitiseAppError(error).message;
   }
   return SAFE_ERROR_MESSAGES.unexpected;
 }
@@ -201,15 +222,19 @@ export function mapSupabaseError(error: SupabaseErrorLike): AppError {
 
   switch (code) {
     case "42501":
-    case "PGRST301":
       return {
         code: "unauthorized",
         message: SAFE_ERROR_MESSAGES.unauthorized,
       };
+    case "PGRST301":
+      return {
+        code: "unauthenticated",
+        message: SAFE_ERROR_MESSAGES.unauthenticated,
+      };
     case "PGRST116":
       return {
-        code: "not_found",
-        message: SAFE_ERROR_MESSAGES.not_found,
+        code: "database",
+        message: SAFE_ERROR_MESSAGES.database,
       };
     case "23505":
       return {

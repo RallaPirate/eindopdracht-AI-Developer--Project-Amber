@@ -97,27 +97,3 @@ export function parseOneOf<T extends string>(
   }
   return ok(value as T);
 }
-
-/**
- * Bounds string length after trim. Useful for titles/notes before DB checks.
- * Does not replace database constraints or RLS.
- */
-export function parseBoundedString(
-  value: unknown,
-  maxLength: number,
-  fieldLabel?: string,
-): AppResult<string> {
-  const parsed = parseNonEmptyString(value, fieldLabel);
-  if (!parsed.ok) {
-    return parsed;
-  }
-  if (parsed.data.length > maxLength) {
-    return err(
-      "validation",
-      fieldLabel
-        ? `${fieldLabel} must be at most ${maxLength} characters.`
-        : SAFE_ERROR_MESSAGES.validation,
-    );
-  }
-  return ok(parsed.data);
-}
