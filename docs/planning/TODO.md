@@ -20,6 +20,16 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   - If the issue recurs, inspect the `enrichDisplayName()` query result, Supabase errors and asynchronous UI updates.
   - Verify after fixing: correct display name after registration, login, refresh and session restoration.
 
+  - [ ] TECH: Fix render-time ref assignments in
+  `src/components/desktop/BioReserveShell.tsx`
+  (lines 92–93, `react-hooks/refs`).
+  Move ref synchronisation to a React-safe pattern
+  while preserving boot, session restoration,
+  welcome screen and account-switching behaviour.
+  Verify with ESLint and a manual authentication
+  smoke test.
+  Priority: Low — pre-existing, non-blocking.
+
 ## Authentication improvements
 
 - [ ] **AUTH-01 — Session verification errors have no recovery UI.**

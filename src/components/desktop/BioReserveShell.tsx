@@ -19,6 +19,7 @@ import {
   writeSoundEnabled,
   type LocalePreference,
 } from "@/lib/preferences";
+import { clearBrowserQueryCache } from "@/lib/queryClient";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 import { enrichDisplayName, resolveAuthSession } from "@/lib/sessionUser";
 
@@ -195,6 +196,8 @@ export function BioReserveShell() {
 
   const handleExecute = useCallback((email: string) => {
     setSignOutError(null);
+    // Drop any previous account's cached query data before entering the desktop.
+    clearBrowserQueryCache();
     setSessionStatus("authenticated");
     setCurrentUser(displayNameFromEmail(email));
     setPhase("loading");
@@ -226,6 +229,7 @@ export function BioReserveShell() {
         return;
       }
 
+      clearBrowserQueryCache();
       resetWindows();
       setSessionStatus("anonymous");
       setCurrentUser("User");

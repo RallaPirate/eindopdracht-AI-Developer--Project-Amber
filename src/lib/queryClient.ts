@@ -23,3 +23,16 @@ export function getQueryClient() {
   browserQueryClient ??= makeQueryClient();
   return browserQueryClient;
 }
+
+/**
+ * Clears all cached query data in the browser QueryClient.
+ * Call on login, registration and account switch so user-specific cache
+ * cannot leak across Auth sessions.
+ *
+ * When authenticated feature queries are introduced, also include the
+ * verified user id in query keys as defence in depth.
+ */
+export function clearBrowserQueryCache() {
+  if (typeof window === "undefined") return;
+  browserQueryClient?.clear();
+}
