@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { VT323 } from "next/font/google";
+import { Providers } from "./providers";
 import "./globals.css";
 
 const vt323 = VT323({
@@ -27,7 +28,7 @@ export default function RootLayout({
             '"MS Sans Serif", "Segoe UI", Tahoma, sans-serif',
         }}
       >
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
