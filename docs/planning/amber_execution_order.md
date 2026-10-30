@@ -38,7 +38,7 @@ This follows the locked design's principle that authenticated access is role/per
 - [X] 2.2 Establish authenticated Supabase client/server access patterns.
 - [X] 2.3 Establish the internal profile/role lookup used by protected operations.
 - [X] 2.4 Add shared validation/error-handling patterns needed by feature queries and mutations.
-- [ ] 2.5 Verify one simple authenticated database read end-to-end.
+- [X] 2.5 Verify one simple authenticated database read end-to-end.
 **Milestone:** UI features can now use a known, consistent data-access pattern.
 
 ### 3. Species workflow — first complete AI feature

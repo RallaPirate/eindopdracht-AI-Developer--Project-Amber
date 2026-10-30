@@ -226,7 +226,10 @@ export function mapSupabaseError(error: SupabaseErrorLike): AppError {
         code: "unauthorized",
         message: SAFE_ERROR_MESSAGES.unauthorized,
       };
+    // PGRST300 (JWT claims / config) stays database via the default branch.
     case "PGRST301":
+    case "PGRST302":
+    case "PGRST303":
       return {
         code: "unauthenticated",
         message: SAFE_ERROR_MESSAGES.unauthenticated,
