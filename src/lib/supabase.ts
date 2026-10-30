@@ -24,6 +24,13 @@ export function getSupabaseBrowserClient(): SupabaseClient {
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
   );
 
-  browserClient = createClient(url, publishableKey);
+  browserClient = createClient(url, publishableKey, {
+    auth: {
+      flowType: "pkce",
+      detectSessionInUrl: false,
+      persistSession: true,
+      autoRefreshToken: true,
+    },
+  });
   return browserClient;
 }

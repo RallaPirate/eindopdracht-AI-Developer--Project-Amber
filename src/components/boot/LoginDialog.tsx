@@ -3,6 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import { isAuthRetryableFetchError } from "@supabase/supabase-js";
 import { Win95Button } from "@/components/ui/Win95Button";
+import {
+  GOOGLE_SIGN_IN_ERROR_MESSAGE,
+  signInWithGoogle,
+} from "@/lib/authReturn";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 const INVALID_CREDENTIALS_MESSAGE = "Invalid email address or password.";
@@ -12,14 +16,40 @@ const SERVICE_UNAVAILABLE_MESSAGE =
 type LoginDialogProps = {
   onExecute: (email: string) => void;
   onCreateUser: () => void;
+  initialError?: string | null;
 };
 
-export function LoginDialog({ onExecute, onCreateUser }: LoginDialogProps) {
+export function LoginDialog({
+  onExecute,
+  onCreateUser,
+  initialError = null,
+}: LoginDialogProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(initialError);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
+
+  async function attemptGoogleLogin() {
+    if (isSubmittingRef.current) return;
+
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
+    setError(null);
+
+    try {
+      const { error: googleError } = await signInWithGoogle();
+      if (googleError) {
+        setError(GOOGLE_SIGN_IN_ERROR_MESSAGE);
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+      }
+    } catch {
+      setError(GOOGLE_SIGN_IN_ERROR_MESSAGE);
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+    }
+  }
 
   async function attemptLogin() {
     if (isSubmittingRef.current) return;
@@ -142,8 +172,9 @@ export function LoginDialog({ onExecute, onCreateUser }: LoginDialogProps) {
           <button
             type="button"
             className="os-bevel-button flex w-full items-center justify-center gap-2 py-2 text-sm"
+            disabled={isSubmitting}
             onClick={() => {
-              // Google OAuth is UI-only in this milestone.
+              void attemptGoogleLogin();
             }}
           >
             <span
