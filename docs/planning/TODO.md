@@ -16,14 +16,26 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   - Observed during task 1.1 verification: a newly registered employee had the correct `profiles.display_name` in Supabase, but the UI initially displayed the email address instead.
   - Expected: the UI displays `profiles.display_name` after the authenticated profile lookup succeeds.
   - Current status: unreproducible after 24 hours; the correct display name now appears in both local development and production.
-  - Root cause unknown; no functional fix applied.
-  - If the issue recurs, inspect the `enrichDisplayName()` query result, Supabase errors and asynchronous UI updates.
-  - Verify after fixing: correct display name after registration, login, refresh and session restoration.
+  - Root cause of the original intermittent fallback remains unknown; no functional fix applied.
+  - Separate follow-up (do not treat as the explanation for the intermittent fallback above): ensure a delayed `enrichDisplayName()` response cannot overwrite the displayed identity after logout or account switching.
+  - If the intermittent fallback recurs, inspect the `enrichDisplayName()` query result, Supabase errors and asynchronous UI updates.
+  - Verify after fixing: correct display name after registration, login, refresh and session restoration; no stale name after logout or account switch.
+
+  - [ ] TECH: Fix render-time ref assignments in
+  `src/components/desktop/BioReserveShell.tsx`
+  (lines 92–93, `react-hooks/refs`).
+  Move ref synchronisation to a React-safe pattern
+  while preserving boot, session restoration,
+  welcome screen and account-switching behaviour.
+  Verify with ESLint and a manual authentication
+  smoke test.
+  Priority: Low — pre-existing, non-blocking.
 
 ## Authentication improvements
 
 - [ ] **AUTH-01 — Session verification errors have no recovery UI.**
   - Observed during baseline verification (0.2) while Supabase was unavailable.
+  - Distinguish transient authentication-service failures (e.g. Auth/API unreachable) from genuinely invalid or absent sessions, and surface them differently in the UI.
   - Add a retry mechanism for transient authentication failures.
   - Provide a safe way to return to login when a stored session is unusable.
   - Do not grant desktop access without successful authentication.
@@ -36,6 +48,17 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
 - Address them at an appropriate point in the implementation schedule.
 - Do not implement unrelated changes while completing an existing checklist task.
 - Mark items complete only after verifying the expected behaviour.
+
+
+- [ ] TECH: Identity-aware TanStack Query cache isolation
+  across all authentication state changes, including
+  session restoration, expiry, logout, account switching
+  and unexpected sign-out.
+  Ensure authenticated query keys include the verified
+  user identity, and pending requests cannot repopulate
+  another user's cache.
+  Must be completed before Step 3.1 introduces private
+  cached queries.
 
 
 
