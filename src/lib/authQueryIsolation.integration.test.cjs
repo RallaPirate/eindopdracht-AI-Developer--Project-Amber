@@ -73,6 +73,23 @@ function harness(t, initialUser = null) {
   }
   function load(request, parent = path.join(root, "src/lib/entry.ts")) {
     if (request === "react") return react;
+    if (request === "@tanstack/react-query") {
+      const actual = require(request);
+      return {
+        ...actual,
+        useQueryClient: () => load("./queryClient.ts").getQueryClient(),
+        // Real TanStack execution, observer state and callback semantics;
+        // only the React scheduling adapter is replaced by this harness.
+        useMutation(options) {
+          const [observer] = react.useState(() => new actual.MutationObserver(
+            load("./queryClient.ts").getQueryClient(), { gcTime: Infinity, ...options },
+          ));
+          react.useEffect(() => observer.setOptions({ gcTime: Infinity, ...options }), [observer, options]);
+          react.useEffect(() => observer.subscribe(() => {}), [observer]);
+          return { ...observer.getCurrentResult(), mutateAsync: observer.mutate };
+        },
+      };
+    }
     if (request === "react/jsx-runtime") return { jsx, jsxs: jsx };
     if (request === "@/lib/supabase") return { getSupabaseBrowserClient: () => supabase };
     if (request === "@/lib/preferences") return {
@@ -101,7 +118,7 @@ function harness(t, initialUser = null) {
   }
   function renderer(component, props = {}) {
     const slots = [];
-    let cursor = 0, dirty = false;
+    let cursor = 0, dirty = false, child;
     const effects = [];
     const changed = (old, deps) => !old || deps.some((value, i) => value !== old[i]);
     const instance = {
@@ -135,8 +152,19 @@ function harness(t, initialUser = null) {
           view = component(props);
           effects.splice(0).forEach((effect) => effect());
         } while (dirty);
+        // Reconcile the protected boundary as React does: same key retains
+        // its hook state; leaving the subtree or changing key discards it.
+        if (view?.type?.name === "ProtectedDesktop") {
+          if (!child || child.key !== view.key) {
+            child = { key: view.key, renderer: renderer(view.type, view.props) };
+          }
+          Object.assign(child.renderer.props, view.props);
+          return child.renderer.render();
+        }
+        child = undefined;
         return view;
       },
+      props,
     };
     return instance;
   }
@@ -396,4 +424,221 @@ test("account switching verifies user B, and a subsequent slow reboot preserves 
   assert.equal(named(h.shell.render(), "Desktop"), null);
   profile.resolve(h.profile()); await flush();
   assert.equal(h.shell.render().type.name, "WelcomeBackDialog");
+});
+
+function mutationHook(h, options) {
+  const { useAuthenticatedMutation } = h.load("../hooks/useAuthenticatedQuery.ts");
+  return h.renderer(() => useAuthenticatedMutation(options));
+}
+
+test("overlapping mutations retain their original epochs and cannot remove newer cached data", async (t) => {
+  const h = harness(t, "user-a"); await flush();
+  const old = deferred(), fresh = deferred(), callbacks = [];
+  const hook = mutationHook(h, {
+    mutationFn: (value) => value === "old" ? old.promise : fresh.promise,
+    onSuccess: (data, value) => callbacks.push([data, value]),
+    onError: () => callbacks.push("error"),
+    onSettled: () => callbacks.push("settled"),
+  });
+  const oldPromise = hook.render().mutateAsync("old", {
+    onError: () => callbacks.push("per-call error"),
+    onSettled: () => callbacks.push("per-call settled"),
+  });
+  const rejected = assert.rejects(oldPromise, { name: "AuthenticatedQueryIdentityError" });
+  await flush();
+  h.qc.clearBrowserQueryCache();
+  const key = h.seed();
+  const freshPromise = hook.render().mutateAsync("fresh");
+  await flush();
+  old.resolve("private old result"); await rejected;
+  assert.equal(callbacks.length, 0);
+  assert.deepEqual(h.qc.getQueryClient().getQueryData(key), ["private-row"]);
+  fresh.resolve("fresh result");
+  assert.equal(await freshPromise, "fresh result");
+  assert.deepEqual(callbacks, [["fresh result", "fresh"], "settled"]);
+});
+
+test("completed mutation data and optimistic context disappear after access changes", async (t) => {
+  const h = harness(t, "user-a"); await flush();
+  const hook = mutationHook(h, {
+    mutationFn: async () => "permission-sensitive result",
+    onMutate: () => ({ privateDraft: "old" }),
+  });
+  await hook.render().mutateAsync();
+  assert.equal(hook.render().data, "permission-sensitive result");
+  h.qc.clearBrowserQueryCache();
+  const after = hook.render();
+  assert.equal(after.data, undefined);
+  assert.equal(after.context, undefined);
+  assert.equal(after.variables, undefined);
+  assert.equal(after.isIdle, true);
+  assert.equal(hook.render().data, undefined);
+});
+
+test("ordinary mutate and mutateAsync preserve variables, optimistic context and callback arguments", async (t) => {
+  const h = harness(t, "user-a"); await flush();
+  const variable = { title: "new" }, optimistic = { previous: "row" }, calls = [];
+  const verify = (data, variables, context, execution) => {
+    assert.equal(data, "saved"); assert.equal(variables, variable);
+    assert.equal(context, optimistic);
+    assert.equal(execution.client, undefined);
+    assert.equal(execution.userId, "user-a");
+    assert.equal(typeof execution.cache.setQueryData, "function");
+    calls.push("success");
+  };
+  const hook = mutationHook(h, {
+    mutationFn: async (variables, context) => {
+      assert.equal(variables, variable); assert.equal(context.userId, "user-a"); return "saved";
+    },
+    onMutate: (variables) => { assert.equal(variables, variable); return optimistic; },
+    onSuccess: verify,
+  });
+  assert.equal(await hook.render().mutateAsync(variable, { onSuccess: verify }), "saved");
+  assert.equal(hook.render().variables, variable);
+  assert.equal(hook.render().context, optimistic);
+  assert.equal(hook.render().mutate(variable, { onSuccess: verify }), undefined);
+  await flush();
+  assert.equal(calls.length, 4);
+});
+
+test("stale pending mutations and retained mutate functions cannot invoke application callbacks", async (t) => {
+  const h = harness(t, "user-a"); await flush();
+  const pending = deferred(); let callbacks = 0, writes = 0;
+  const hook = mutationHook(h, {
+    mutationFn: () => { writes++; return pending.promise; },
+    onSuccess: () => callbacks++, onError: () => callbacks++, onSettled: () => callbacks++,
+  });
+  const oldResult = hook.render();
+  oldResult.mutate(undefined, {
+    onSuccess: () => callbacks++, onError: () => callbacks++, onSettled: () => callbacks++,
+  });
+  await flush();
+  h.emit("SIGNED_OUT", null);
+  pending.resolve("private"); await flush();
+  assert.equal(callbacks, 0);
+  assert.equal(hook.render().data, undefined);
+  await assert.rejects(oldResult.mutateAsync(), { name: "AuthenticatedQueryIdentityError" });
+  assert.equal(writes, 1);
+});
+
+for (const event of ["SIGNED_OUT", "SIGNED_IN", "permission change"]) {
+  test(`protected windows are discarded after ${event}, even when verification finishes between renders`, async (t) => {
+    const h = harness(t, "user-a"); await flush(); await desktop(h);
+    named(h.shell.render(), "Desktop").props.onOpenProgram("reports");
+    assert.equal(named(h.shell.render(), "Desktop").props.windows.length, 1);
+    if (event === "permission change") {
+      h.qc.applyBrowserPermissionRead("user-a", { status: "active", role: "management" });
+    } else {
+      h.emit(event, event === "SIGNED_OUT" ? null : "user-b");
+      h.fire(0); await flush();
+    }
+    if (event === "SIGNED_OUT") {
+      const login = h.shell.render();
+      assert.equal(login.type.name, "LoginDialog");
+      h.emit("SIGNED_IN", "user-b"); await login.props.onExecute("b@example.com");
+      h.shell.render().props.onComplete();
+    }
+    const after = named(h.shell.render(), "Desktop");
+    assert.ok(after);
+    assert.equal(after.props.windows.length, 0);
+    assert.equal(after.props.activeId, null);
+  });
+}
+
+test("routine token refresh retains open windows, positions, completed mutation and cache", async (t) => {
+  const h = harness(t, "user-a"); await flush(); await desktop(h);
+  named(h.shell.render(), "Desktop").props.onOpenProgram("reports");
+  named(h.shell.render(), "Desktop").props.onMoveWindow("reports", 230, 120);
+  const windows = named(h.shell.render(), "Desktop").props.windows;
+  const key = h.seed();
+  const hook = mutationHook(h, { mutationFn: async () => "saved" });
+  await hook.render().mutateAsync();
+  const epoch = h.qc.getVerifiedAuthSnapshot().accessEpoch;
+  h.emit("TOKEN_REFRESHED"); h.fire(0); await flush();
+  assert.equal(h.qc.getVerifiedAuthSnapshot().accessEpoch, epoch);
+  assert.equal(named(h.shell.render(), "Desktop").props.windows, windows);
+  assert.equal(named(h.shell.render(), "Desktop").props.activeId, "reports");
+  assert.equal(hook.render().data, "saved");
+  assert.deepEqual(h.qc.getQueryClient().getQueryData(key), ["private-row"]);
+});
+
+// Exercise the actual hook + TanStack observer, not a standalone guard helper.
+for (const location of ["hook", "per-call"]) {
+  for (const phase of ["onMutate", "onSuccess", "onError", "onSettled"]) {
+    if (location === "per-call" && phase === "onMutate") continue;
+    test(`async ${location} ${phase} cannot overwrite Employee data after Management access ends`, async (t) => {
+      const h = harness(t, "user-a"); await flush();
+      h.qc.applyBrowserPermissionRead("user-a", { status: "active", role: "management" });
+      h.seed();
+      const started = deferred(), resume = deferred(), finished = deferred();
+      let context, callbackError;
+      const callback = async (...args) => {
+        try {
+          context = args.at(-1);
+          assert.equal(context.client, undefined, "raw QueryClient is no longer exposed");
+          started.resolve();
+          await resume.promise;
+          // This used to be context.client.setQueryData on the same user's
+          // newly-created Employee query. The supported capability must check
+          // NOW, not just before entering or after awaiting this callback.
+          context.cache.setQueryData(["private"], ["Management-only data"]);
+          await context.cache.invalidateQueries(["private"]);
+          return { optimistic: "old Management context" };
+        } catch (error) { callbackError = error; }
+        finally { finished.resolve(); }
+      };
+      const options = {
+        mutationFn: async () => {
+          if (phase === "onError") throw new Error("server operation failed");
+          return "Management mutation result";
+        },
+        ...(location === "hook" ? { [phase]: callback } : {}),
+      };
+      const hook = mutationHook(h, options);
+      const promise = hook.render().mutateAsync(undefined,
+        location === "per-call" ? { [phase]: callback } : undefined);
+      // Per-call callbacks retain TanStack's fire-and-forget semantics; attach
+      // a rejection handler immediately, whether or not the promise has settled.
+      const outcome = promise.then((data) => ({ data }), (error) => ({ error }));
+      await started.promise;
+      h.qc.applyBrowserPermissionRead("user-a", { status: "active", role: "employee" });
+      const key = h.seed();
+      h.qc.getQueryClient().setQueryData(key, ["Employee-safe data"]);
+      resume.resolve(); await finished.promise; await outcome; await flush();
+      assert.equal(callbackError, undefined);
+      assert.deepEqual(h.qc.getQueryClient().getQueryData(key), ["Employee-safe data"]);
+      assert.equal(h.qc.getQueryClient().getQueryState(key).isInvalidated, false);
+      assert.equal(hook.render().data, undefined);
+    });
+  }
+}
+
+test("current-epoch callback capabilities update scoped cache data and invalidate queries", async (t) => {
+  const h = harness(t, "user-a"); await flush();
+  const key = h.seed(), optimistic = { previous: "row" };
+  let execution;
+  const hook = mutationHook(h, {
+    mutationFn: async () => "saved",
+    onMutate: async (_variables, context) => {
+      await flush();
+      context.cache.setQueryData(["private"], ["optimistic"]);
+      return optimistic;
+    },
+    onSuccess: async (_data, _variables, result, context) => {
+      assert.equal(result, optimistic);
+      execution = context;
+      await flush();
+      context.cache.setQueryData(["private"], ["confirmed"]);
+      await context.cache.invalidateQueries(["private"]);
+    },
+  });
+  assert.equal(await hook.render().mutateAsync(), "saved");
+  assert.deepEqual(h.qc.getQueryClient().getQueryData(key), ["confirmed"]);
+  assert.equal(h.qc.getQueryClient().getQueryState(key).isInvalidated, true);
+  assert.equal(execution.client, undefined);
+  let updaterRan = false;
+  assert.throws(() => execution.cache.setQueryData(["private"], () => { updaterRan = true; }), { name: "TypeError" });
+  assert.equal(updaterRan, false);
+  execution.cache.setQueryData(["missing"], ["must refetch instead"]);
+  assert.equal(h.qc.getQueryClient().getQueryData(["auth-user", "user-a", "missing"]), undefined);
 });

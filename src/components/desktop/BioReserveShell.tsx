@@ -117,16 +117,6 @@ export function BioReserveShell() {
     getVerifiedAuthSnapshot,
     getVerifiedAuthSnapshot,
   );
-  const {
-    windows,
-    activeId,
-    openWindow,
-    closeWindow,
-    focusWindow,
-    moveWindow,
-    resetWindows,
-  } = useWindowManager();
-
   const startBootCycle = useCallback(() => {
     setSignOutError(null);
     setAuthErrorMessage(null);
@@ -258,7 +248,6 @@ export function BioReserveShell() {
         return;
       }
 
-      resetWindows();
       setSessionStatus("anonymous");
       setCurrentUser("User");
       setWelcomeDisplayName("User");
@@ -268,16 +257,15 @@ export function BioReserveShell() {
       void requestAuthQuerySync();
       setSignOutError("Unable to sign out of this workstation. Please try again.");
     }
-  }, [resetWindows]);
+  }, []);
 
   const handleReboot = useCallback(() => {
-    resetWindows();
     setSignOutError(null);
     setAuthErrorMessage(null);
     setCurrentUser("User");
     setWelcomeDisplayName("User");
     setPhase("fullscreen");
-  }, [resetWindows]);
+  }, []);
 
   const handleLocaleChange = useCallback((next: LocalePreference) => {
     writeLocale(next);
@@ -370,6 +358,49 @@ export function BioReserveShell() {
   }
 
   return (
+    <ProtectedDesktop
+      key={authAccess.accessEpoch}
+      currentUser={authAccess.displayName ?? currentUser}
+      locale={locale}
+      soundEnabled={soundEnabled}
+      signOutError={signOutError}
+      onDismissError={() => setSignOutError(null)}
+      onLocaleChange={handleLocaleChange}
+      onSoundToggle={handleSoundToggle}
+      onChangeUser={() => {
+        void handleChangeUser();
+      }}
+      onReboot={handleReboot}
+    />
+  );
+}
+
+// Window state and every program instance belong to one verified access epoch.
+function ProtectedDesktop({
+  currentUser,
+  locale,
+  soundEnabled,
+  signOutError,
+  onDismissError,
+  onLocaleChange,
+  onSoundToggle,
+  onChangeUser,
+  onReboot,
+}: {
+  currentUser: string;
+  locale: LocalePreference;
+  soundEnabled: boolean;
+  signOutError: string | null;
+  onDismissError: () => void;
+  onLocaleChange: (locale: LocalePreference) => void;
+  onSoundToggle: () => void;
+  onChangeUser: () => void;
+  onReboot: () => void;
+}) {
+  const {
+    windows, activeId, openWindow, closeWindow, focusWindow, moveWindow,
+  } = useWindowManager();
+  return (
     <div className="relative flex h-full w-full flex-col">
       <div className="relative min-h-0 flex-1">
         <Desktop
@@ -382,18 +413,16 @@ export function BioReserveShell() {
         />
       </div>
       <Taskbar
-        currentUser={authAccess.displayName ?? currentUser}
+        currentUser={currentUser}
         windows={windows}
         activeId={activeId}
         locale={locale}
         soundEnabled={soundEnabled}
         onFocusWindow={focusWindow}
-        onLocaleChange={handleLocaleChange}
-        onSoundToggle={handleSoundToggle}
-        onChangeUser={() => {
-          void handleChangeUser();
-        }}
-        onReboot={handleReboot}
+        onLocaleChange={onLocaleChange}
+        onSoundToggle={onSoundToggle}
+        onChangeUser={onChangeUser}
+        onReboot={onReboot}
       />
 
       {signOutError ? (
@@ -408,7 +437,7 @@ export function BioReserveShell() {
                 <button
                   type="button"
                   className="os-bevel-button px-3 py-1 text-sm"
-                  onClick={() => setSignOutError(null)}
+                  onClick={onDismissError}
                 >
                   OK
                 </button>

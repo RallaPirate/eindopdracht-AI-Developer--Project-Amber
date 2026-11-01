@@ -50,7 +50,7 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
 - Mark items complete only after verifying the expected behaviour.
 
 
-- [ ] TECH: Identity-aware TanStack Query cache isolation
+- [X] TECH: Identity-aware TanStack Query cache isolation
   across all authentication state changes, including
   session restoration, expiry, logout, account switching
   and unexpected sign-out.
@@ -64,6 +64,15 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   The browser cache binds to the verified Auth user id
   from `getClaims()`, and a `profiles.role` change removes
   cached rows for that same user. `initialData` is not restored.
+    Verification (2026-11-01):
+  - Independent Stage 2 acceptance review: PASS.
+  - 52/52 automated tests passed; TypeScript and production
+    build passed.
+  - 5/5 final local browser smoke checks passed, covering
+    login, restoration, account switching, unexpected sign-out,
+    reauthentication and desktop behaviour.
+  - Protected mutation callbacks use the epoch-bound cache
+    capability documented in useAuthenticatedQuery.ts.
 
 
 

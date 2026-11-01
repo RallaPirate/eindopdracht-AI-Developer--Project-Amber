@@ -1,10 +1,11 @@
 "use client";
 
-import { useRef, useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import {
   useMutation,
   useQuery,
   useQueryClient,
+  type MutateOptions,
   type QueryFunctionContext,
   type UseMutationOptions,
   type UseMutationResult,
@@ -16,7 +17,6 @@ import {
   subscribeVerifiedAuthSnapshot,
 } from "@/lib/queryClient";
 import {
-  AUTHENTICATED_QUERY_ROOT,
   AuthenticatedQueryIdentityError,
   authenticatedQueryKey,
   isAuthenticatedAccessCurrent,
@@ -38,6 +38,45 @@ export type AuthenticatedMutationContext = {
   userId: string;
 };
 
+export type AuthenticatedMutationCallbackContext = AuthenticatedMutationContext & {
+  cache: {
+    /** Scope excludes the auth-user/user-id prefix. Values only, no updater functions.
+     * Updates an existing query from this epoch; missing queries are left for refetch.
+     * Stale capabilities silently do nothing, including after an await. */
+    setQueryData: <T>(scope: readonly unknown[], data: T) => void;
+    invalidateQueries: (scope: readonly unknown[]) => Promise<void>;
+  };
+};
+
+type MutationCallbacks<TData, TError, TVariables, TOnMutateResult> = {
+  onMutate?: (
+    variables: TVariables, context: AuthenticatedMutationCallbackContext,
+  ) => TOnMutateResult | Promise<TOnMutateResult>;
+  onSuccess?: (
+    data: TData, variables: TVariables, result: TOnMutateResult | undefined,
+    context: AuthenticatedMutationCallbackContext,
+  ) => unknown;
+  onError?: (
+    error: TError, variables: TVariables, result: TOnMutateResult | undefined,
+    context: AuthenticatedMutationCallbackContext,
+  ) => unknown;
+  onSettled?: (
+    data: TData | undefined, error: TError | null, variables: TVariables,
+    result: TOnMutateResult | undefined, context: AuthenticatedMutationCallbackContext,
+  ) => unknown;
+};
+
+type MutationCallArgs<TData, TError, TVariables, TOnMutateResult> =
+  undefined extends TVariables
+    ? [variables?: TVariables, callbacks?: Omit<MutationCallbacks<TData, TError, TVariables, TOnMutateResult>, "onMutate">]
+    : [variables: TVariables, callbacks?: Omit<MutationCallbacks<TData, TError, TVariables, TOnMutateResult>, "onMutate">];
+
+type AuthenticatedMutationResult<TData, TError, TVariables, TOnMutateResult> =
+  Omit<UseMutationResult<TData, TError, TVariables, TOnMutateResult>, "mutate" | "mutateAsync"> & {
+    mutate: (...args: MutationCallArgs<TData, TError, TVariables, TOnMutateResult>) => void;
+    mutateAsync: (...args: MutationCallArgs<TData, TError, TVariables, TOnMutateResult>) => Promise<TData>;
+  };
+
 function useVerifiedAuthSnapshot(): AuthAccessSnapshot {
   return useSyncExternalStore(
     subscribeVerifiedAuthSnapshot,
@@ -48,14 +87,6 @@ function useVerifiedAuthSnapshot(): AuthAccessSnapshot {
 
 function accessNotReady(): boolean {
   return getVerifiedAuthSnapshot().status !== "ready";
-}
-
-function dropAuthenticatedQueries(
-  queryClient: ReturnType<typeof useQueryClient>,
-) {
-  queryClient.removeQueries({
-    predicate: (query) => query.queryKey[0] === AUTHENTICATED_QUERY_ROOT,
-  });
 }
 
 function accessCurrent(started: AuthenticatedAccess): boolean {
@@ -144,8 +175,8 @@ export function useAuthenticatedQuery<TData, TError = Error>(
 type AuthenticatedMutationOptions<TData, TError, TVariables, TOnMutateResult> =
   Omit<
     UseMutationOptions<TData, TError, TVariables, TOnMutateResult>,
-    "mutationKey" | "mutationFn"
-  > & {
+    "mutationKey" | "mutationFn" | "onMutate" | "onSuccess" | "onError" | "onSettled"
+  > & MutationCallbacks<TData, TError, TVariables, TOnMutateResult> & {
     mutationKey?: readonly unknown[];
     mutationFn: (
       variables: TVariables,
@@ -154,11 +185,16 @@ type AuthenticatedMutationOptions<TData, TError, TVariables, TOnMutateResult> =
   };
 
 /**
- * Mutation hook whose cache callbacks do not run after the access epoch
- * changes. The epoch moves on sign-out, account switch, same-user
- * reauthentication and permission changes, not only when the Auth user id
- * changes. Skipping the callbacks leaves a completed server write in place:
- * cancellation is not treated as a rollback of that write.
+ * Section 3 contract: callbacks may await, but protected cache changes MUST use
+ * the supplied context.cache capability, which checks access at each operation.
+ * It scopes keys to the invocation's user and never exposes a raw QueryClient.
+ * Capturing/importing an unrestricted client, mutating cached objects in place,
+ * or scheduling unguarded side effects is unsupported: this hook cannot secure
+ * arbitrary application code. Use immutable values with cache.setQueryData;
+ * use cache.invalidateQueries when a query needs to be fetched/created.
+ * Hook callbacks are awaited by TanStack; per-call callbacks keep TanStack's
+ * fire-and-forget semantics. Both receive the same restricted cache capability.
+ * Neither observer reset nor a stale rejection reverses a committed server write.
  */
 export function useAuthenticatedMutation<
   TData = unknown,
@@ -172,10 +208,10 @@ export function useAuthenticatedMutation<
     TVariables,
     TOnMutateResult
   >,
-): UseMutationResult<TData, TError, TVariables, TOnMutateResult> {
+): AuthenticatedMutationResult<TData, TError, TVariables, TOnMutateResult> {
   const queryClient = useQueryClient();
   const access = useVerifiedAuthSnapshot();
-  const { userId } = access;
+  const { userId, accessEpoch } = access;
   const {
     mutationKey = [],
     mutationFn,
@@ -185,68 +221,111 @@ export function useAuthenticatedMutation<
     onSettled,
     ...rest
   } = options;
-  const attemptRef = useRef<AuthenticatedAccess | null>(null);
-
-  const attemptStillCurrent = () => {
-    const attempt = attemptRef.current;
-    return attempt !== null && accessCurrent(attempt);
+  // Private variables retain access per invocation, including overlapping calls
+  // and retries, without changing the caller's optimistic-update context.
+  type Invocation = { variables: TVariables; access: AuthenticatedAccess };
+  const current = (call: Invocation) =>
+    accessCurrent(call.access) && !accessNotReady();
+  const requireCurrent = (call: Invocation) => {
+    if (!current(call)) throw new AuthenticatedQueryIdentityError();
   };
-
-  return useMutation({
-    ...rest,
-    mutationKey: userId
-      ? authenticatedQueryKey(userId, mutationKey)
-      : unverifiedQueryKey(mutationKey),
-    mutationFn: async (variables) => {
-      if (!attemptStillCurrent() || !userId || accessNotReady()) {
-        dropAuthenticatedQueries(queryClient);
-        throw new AuthenticatedQueryIdentityError();
-      }
-
-      const data = await mutationFn(variables, { userId });
-
-      if (!attemptStillCurrent() || accessNotReady()) {
-        dropAuthenticatedQueries(queryClient);
-        throw new AuthenticatedQueryIdentityError();
-      }
-
-      return data;
-    },
-    onMutate: async (variables, context) => {
-      const attempt: AuthenticatedAccess = {
-        userId: getVerifiedAuthSnapshot().userId ?? "",
-        epoch: getVerifiedAuthSnapshot().accessEpoch,
-      };
-      attemptRef.current = attempt;
-      if (
-        !getVerifiedAuthSnapshot().userId ||
-        !accessCurrent(attempt) ||
-        accessNotReady()
-      ) {
-        throw new AuthenticatedQueryIdentityError();
-      }
-      const result = onMutate
-        ? await onMutate(variables, context)
-        : (undefined as TOnMutateResult);
-      if (!accessCurrent(attempt) || accessNotReady()) {
-        dropAuthenticatedQueries(queryClient);
-        throw new AuthenticatedQueryIdentityError();
-      }
-      return result;
-    },
-    onSuccess: (data, variables, onMutateResult, context) => {
-      if (!attemptStillCurrent()) return;
-      return onSuccess?.(data, variables, onMutateResult, context);
-    },
-    onError: (error, variables, onMutateResult, context) => {
-      if (!attemptStillCurrent()) return;
-      if (error instanceof AuthenticatedQueryIdentityError) return;
-      return onError?.(error, variables, onMutateResult, context);
-    },
-    onSettled: (data, error, variables, onMutateResult, context) => {
-      if (!attemptStillCurrent()) return;
-      if (error instanceof AuthenticatedQueryIdentityError) return;
-      return onSettled?.(data, error, variables, onMutateResult, context);
+  const callbackContext = (call: Invocation): AuthenticatedMutationCallbackContext => ({
+    userId: call.access.userId,
+    cache: {
+      setQueryData: (scope, data) => {
+        if (!current(call)) return;
+        // TanStack interprets functions as updaters. Do not run arbitrary code
+        // between the access check and the write.
+        if (typeof data === "function") throw new TypeError("Cache updates require a value.");
+        const queryKey = authenticatedQueryKey(call.access.userId, scope);
+        const query = queryClient.getQueryCache().find({ queryKey, exact: true });
+        if (query?.meta?.accessEpoch !== call.access.epoch) return;
+        queryClient.setQueryData(queryKey, data);
+      },
+      invalidateQueries: (scope) => {
+        if (!current(call)) return Promise.resolve();
+        return queryClient.invalidateQueries({
+          queryKey: authenticatedQueryKey(call.access.userId, scope),
+        });
+      },
     },
   });
+  const mutation = useMutation<TData, TError, Invocation, TOnMutateResult>({
+    ...rest,
+    mutationKey: [
+      ...(userId
+        ? authenticatedQueryKey(userId, mutationKey)
+        : unverifiedQueryKey(mutationKey)),
+      accessEpoch,
+    ],
+    mutationFn: async (call) => {
+      requireCurrent(call);
+      const data = await mutationFn(call.variables, { userId: call.access.userId });
+      requireCurrent(call);
+      return data;
+    },
+    onMutate: async (call) => {
+      requireCurrent(call);
+      const result = await onMutate?.(call.variables, callbackContext(call));
+      requireCurrent(call);
+      return result as TOnMutateResult;
+    },
+    onSuccess: (data, call, result) => {
+      if (current(call)) return onSuccess?.(data, call.variables, result, callbackContext(call));
+    },
+    onError: (error, call, result) => {
+      if (current(call) && !(error instanceof AuthenticatedQueryIdentityError))
+        return onError?.(error, call.variables, result, callbackContext(call));
+    },
+    onSettled: (data, error, call, result) => {
+      if (current(call) && !(error instanceof AuthenticatedQueryIdentityError))
+        return onSettled?.(data, error, call.variables, result, callbackContext(call));
+    },
+  });
+  const { reset } = mutation;
+  useEffect(() => {
+    reset();
+  }, [accessEpoch, reset]);
+
+  const mutateAsync: AuthenticatedMutationResult<TData, TError, TVariables, TOnMutateResult>["mutateAsync"] =
+    (...args) => {
+      const [variables, callbacks] = args;
+      const invocation: Invocation = {
+        variables: variables as TVariables,
+        access: { userId: userId ?? "", epoch: accessEpoch },
+      };
+      const guarded: MutateOptions<TData, TError, Invocation, TOnMutateResult> = {
+        onSuccess: (data, call, result) => {
+          if (current(call)) callbacks?.onSuccess?.(data, call.variables, result, callbackContext(call));
+        },
+        onError: (error, call, result) => {
+          if (current(call) && !(error instanceof AuthenticatedQueryIdentityError))
+            callbacks?.onError?.(error, call.variables, result, callbackContext(call));
+        },
+        onSettled: (data, error, call, result) => {
+          if (current(call) && !(error instanceof AuthenticatedQueryIdentityError))
+            callbacks?.onSettled?.(data, error, call.variables, result, callbackContext(call));
+        },
+      };
+      return mutation.mutateAsync(invocation, guarded).then((data) => {
+        requireCurrent(invocation);
+        return data;
+      });
+    };
+  const mutate: AuthenticatedMutationResult<TData, TError, TVariables, TOnMutateResult>["mutate"] =
+    (...args) => { void mutateAsync(...args).catch(() => {}); };
+
+  // Hide a previous observer result during the boundary render, before the
+  // epoch-key/reset effects run. Reset also detaches pending old mutations.
+  if (mutation.variables && !current(mutation.variables)) {
+    return {
+      ...mutation, data: undefined, error: null, context: undefined,
+      variables: undefined, status: "idle", isIdle: true, isPending: false,
+      isSuccess: false, isError: false, failureCount: 0, failureReason: null,
+      submittedAt: 0, isPaused: false, mutate, mutateAsync,
+    };
+  }
+  return {
+    ...mutation, variables: mutation.variables?.variables, mutate, mutateAsync,
+  } as AuthenticatedMutationResult<TData, TError, TVariables, TOnMutateResult>;
 }
