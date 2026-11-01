@@ -1,0 +1,225 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  applyBrowserPermissionRead,
+  beginBrowserAuthCheck,
+  beginBrowserAuthEvent,
+  cancelPendingBrowserAuthSync,
+  commitBrowserVerifiedUser,
+  getVerifiedAuthSnapshot,
+  getVerifiedAuthUserId,
+  isBrowserAuthCheckCurrent,
+} from "@/lib/queryClient";
+import {
+  classifyPermissionRead,
+  resolveAuthVerification,
+  type AuthCommit,
+  type AuthAccessSnapshot,
+  type PermissionRead,
+} from "@/lib/queryCacheIsolation";
+import { getSupabaseBrowserClient } from "@/lib/supabase";
+import { isApplicationRole } from "@/types/database";
+
+const PERMISSION_RECHECK_MS = 60_000;
+const MAX_MISMATCH_RETRIES = 2;
+
+let requestSync: (() => Promise<AuthAccessSnapshot>) | null = null;
+
+/**
+ * Invalidates an in-flight identity sync so a slow verification cannot
+ * reattach the previous user after logout or account switch.
+ */
+export function cancelPendingAuthQuerySync() {
+  cancelPendingBrowserAuthSync();
+}
+
+/** Runs a new verification if the browser isolation loop is active. */
+export function requestAuthQuerySync(): Promise<AuthAccessSnapshot> {
+  return requestSync?.() ?? Promise.resolve(getVerifiedAuthSnapshot());
+}
+
+async function readPermissionScope(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<PermissionRead> {
+  try {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("role, display_name")
+      .eq("auth_user_id", userId)
+      .maybeSingle();
+
+    const role = data?.role;
+    const status = classifyPermissionRead(Boolean(error), isApplicationRole(role));
+    if (status === "active" && isApplicationRole(role)) {
+      const displayName =
+        typeof data?.display_name === "string"
+          ? data.display_name.trim()
+          : "";
+      return {
+        status: "active",
+        role,
+        displayName: displayName || undefined,
+      };
+    }
+    if (status === "revoked") return { status: "revoked" };
+    return { status: "unavailable" };
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+/**
+ * Keeps the browser QueryClient aligned with the verified Supabase Auth user.
+ * Auth events drop the previous binding before verification is awaited.
+ * Authenticated queries stay disabled until a claims check binds a user id.
+ */
+export function startAuthQueryIsolation(): () => void {
+  if (typeof window === "undefined") return () => {};
+
+  let supabase: SupabaseClient;
+  try {
+    supabase = getSupabaseBrowserClient();
+  } catch {
+    return () => {};
+  }
+
+  let disposed = false;
+  let retryTimer: number | undefined;
+
+  const clearRetry = () => {
+    if (retryTimer === undefined) return;
+    window.clearTimeout(retryTimer);
+    retryTimer = undefined;
+  };
+
+  const scheduleRetry = (generation: number, retries: number) => {
+    if (disposed || !isBrowserAuthCheckCurrent(generation)) return;
+    if (retries >= MAX_MISMATCH_RETRIES) return;
+    clearRetry();
+    retryTimer = window.setTimeout(() => {
+      if (disposed || !isBrowserAuthCheckCurrent(generation)) return;
+      retryTimer = undefined;
+      void verifyGeneration(beginBrowserAuthCheck(), retries + 1);
+    }, 50);
+  };
+
+  const verifyGeneration = async (
+    generation: number,
+    retries = 0,
+  ): Promise<AuthAccessSnapshot> => {
+      if (disposed || !isBrowserAuthCheckCurrent(generation)) {
+        return getVerifiedAuthSnapshot();
+      }
+      let verified: AuthCommit | undefined;
+      try {
+        const claims = await supabase.auth.getClaims();
+        if (disposed || !isBrowserAuthCheckCurrent(generation)) {
+          return getVerifiedAuthSnapshot();
+        }
+
+        const session = await supabase.auth.getSession();
+        if (disposed || !isBrowserAuthCheckCurrent(generation)) {
+          return getVerifiedAuthSnapshot();
+        }
+
+        const claimedUserId =
+          !claims.error &&
+          typeof claims.data?.claims?.sub === "string" &&
+          claims.data.claims.sub.length > 0
+            ? claims.data.claims.sub
+            : null;
+
+        verified = resolveAuthVerification(
+          claims.error,
+          claimedUserId,
+          session.error,
+          session.data.session?.user?.id ?? null,
+        );
+      } catch {
+        scheduleRetry(generation, retries);
+        return getVerifiedAuthSnapshot();
+      }
+      if (!verified) return getVerifiedAuthSnapshot();
+
+      if (disposed || !isBrowserAuthCheckCurrent(generation)) {
+        return getVerifiedAuthSnapshot();
+      }
+
+      if (verified.status === "stale") {
+        commitBrowserVerifiedUser(generation, verified);
+        scheduleRetry(generation, retries);
+        return getVerifiedAuthSnapshot();
+      }
+
+      if (verified.status === "ignored" || verified.status === "unavailable") {
+        return getVerifiedAuthSnapshot();
+      }
+
+      clearRetry();
+      commitBrowserVerifiedUser(generation, verified);
+      if (disposed || !isBrowserAuthCheckCurrent(generation)) {
+        return getVerifiedAuthSnapshot();
+      }
+
+      if (verified.status !== "authenticated") {
+        return getVerifiedAuthSnapshot();
+      }
+      const verifiedUserId = verified.userId;
+      if (getVerifiedAuthUserId() !== verifiedUserId) {
+        return getVerifiedAuthSnapshot();
+      }
+
+      const permission = await readPermissionScope(supabase, verifiedUserId);
+      if (disposed || !isBrowserAuthCheckCurrent(generation)) {
+        return getVerifiedAuthSnapshot();
+      }
+      if (getVerifiedAuthUserId() !== verifiedUserId) {
+        return getVerifiedAuthSnapshot();
+      }
+      applyBrowserPermissionRead(verifiedUserId, permission);
+      return getVerifiedAuthSnapshot();
+  };
+
+  const sync = () => {
+    clearRetry();
+    return verifyGeneration(beginBrowserAuthCheck());
+  };
+
+  const { data } = supabase.auth.onAuthStateChange((event, session) => {
+    if (disposed) return;
+    // Drop the previous cache binding before any awaited claims check.
+    // The callback must not itself call getClaims or getSession.
+    const generation = beginBrowserAuthEvent(
+      event,
+      session?.user?.id ?? null,
+    );
+    clearRetry();
+    window.setTimeout(() => {
+      if (!disposed) void verifyGeneration(generation);
+    }, 0);
+  });
+
+  const onVisible = () => {
+    if (document.visibilityState === "visible") sync();
+  };
+
+  document.addEventListener("visibilitychange", onVisible);
+  window.addEventListener("online", onVisible);
+
+  const intervalId = window.setInterval(() => {
+    if (document.visibilityState === "visible") sync();
+  }, PERMISSION_RECHECK_MS);
+
+  requestSync = sync;
+  sync();
+
+  return () => {
+    disposed = true;
+    if (requestSync === sync) requestSync = null;
+    clearRetry();
+    window.clearInterval(intervalId);
+    data.subscription.unsubscribe();
+    document.removeEventListener("visibilitychange", onVisible);
+    window.removeEventListener("online", onVisible);
+  };
+}
