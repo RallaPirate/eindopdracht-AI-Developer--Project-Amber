@@ -19,9 +19,14 @@ import {
   writeSoundEnabled,
   type LocalePreference,
 } from "@/lib/preferences";
-import { clearBrowserQueryCache } from "@/lib/queryClient";
+import {
+  requestAuthQuerySync,
+} from "@/lib/authQueryIsolation";
+import {
+  getVerifiedAuthSnapshot,
+  subscribeVerifiedAuthSnapshot,
+} from "@/lib/queryClient";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
-import { enrichDisplayName, resolveAuthSession } from "@/lib/sessionUser";
 
 export type ShellPhase =
   | "fullscreen"
@@ -32,6 +37,7 @@ export type ShellPhase =
   | "welcome"
   | "loading"
   | "desktop"
+  | "accessSuspended"
   | "authError";
 
 type SessionStatus =
@@ -87,6 +93,9 @@ export function BioReserveShell() {
   const [sessionCheckId, setSessionCheckId] = useState(0);
   const [authErrorMessage, setAuthErrorMessage] = useState<string | null>(null);
   const [signOutError, setSignOutError] = useState<string | null>(null);
+  const [resumePhase, setResumePhase] = useState<
+    "welcome" | "loading" | "desktop"
+  >("welcome");
 
   const sessionStatusRef = useRef(sessionStatus);
   const currentUserRef = useRef(currentUser);
@@ -103,7 +112,11 @@ export function BioReserveShell() {
     readSoundEnabled,
     () => true,
   );
-
+  const authAccess = useSyncExternalStore(
+    subscribeVerifiedAuthSnapshot,
+    getVerifiedAuthSnapshot,
+    getVerifiedAuthSnapshot,
+  );
   const {
     windows,
     activeId,
@@ -117,6 +130,7 @@ export function BioReserveShell() {
   const startBootCycle = useCallback(() => {
     setSignOutError(null);
     setAuthErrorMessage(null);
+    setResumePhase("welcome");
     setSessionStatus("pending");
     setSessionCheckId((id) => id + 1);
     setPhase("boot");
@@ -127,6 +141,14 @@ export function BioReserveShell() {
     if (status === "pending") return;
 
     if (status === "authenticated") {
+      const access = getVerifiedAuthSnapshot();
+      if (access.status !== "ready") {
+        setResumePhase("welcome");
+        setPhase("accessSuspended");
+        void requestAuthQuerySync();
+        return;
+      }
+      if (access.displayName) setCurrentUser(access.displayName);
       setWelcomeDisplayName(currentUserRef.current);
       setPhase("welcome");
       return;
@@ -144,20 +166,12 @@ export function BioReserveShell() {
     if (sessionCheckId === 0) return;
 
     let cancelled = false;
-
-    void (async () => {
-      const result = await resolveAuthSession();
+    void requestAuthQuerySync().then((result) => {
       if (cancelled) return;
-
-      if (result.status === "authenticated") {
+      if (result.status === "ready" && result.userId) {
         setSessionStatus("authenticated");
-        setCurrentUser(result.displayName);
+        setCurrentUser(result.displayName ?? "User");
         setAuthErrorMessage(null);
-
-        void enrichDisplayName(result.user.id).then((name) => {
-          if (cancelled || !name) return;
-          setCurrentUser(name);
-        });
         return;
       }
 
@@ -167,20 +181,30 @@ export function BioReserveShell() {
         return;
       }
 
-      setSessionStatus(result.status);
-      setAuthErrorMessage(result.message);
-    })();
+      if (result.status === "revoked") {
+        setSessionStatus("auth_error");
+        setAuthErrorMessage(
+          "This account is not linked to an active BioReserve profile.",
+        );
+        return;
+      }
 
+      if (result.status === "suspended" && result.userId) {
+        setSessionStatus("authenticated");
+        setAuthErrorMessage(
+          "Unable to verify profile access. Protected access is suspended.",
+        );
+        return;
+      }
+
+      // A replacement check owns the final outcome. Keep boot pending until
+      // the subscribed authority below resolves its presentation.
+      setSessionStatus("pending");
+    });
     return () => {
       cancelled = true;
     };
   }, [sessionCheckId]);
-
-  useEffect(() => {
-    if (phase === "awaitingSession" && sessionStatus !== "pending") {
-      branchAfterSessionResolved();
-    }
-  }, [phase, sessionStatus, branchAfterSessionResolved]);
 
   const handleBootComplete = useCallback(() => {
     if (sessionStatusRef.current === "pending") {
@@ -194,22 +218,26 @@ export function BioReserveShell() {
     setPhase("loading");
   }, []);
 
-  const handleExecute = useCallback((email: string) => {
+  const handleExecute = useCallback(async (email: string) => {
     setSignOutError(null);
-    // Drop any previous account's cached query data before entering the desktop.
-    clearBrowserQueryCache();
     setSessionStatus("authenticated");
     setCurrentUser(displayNameFromEmail(email));
-    setPhase("loading");
+    setResumePhase("loading");
+    setPhase("accessSuspended");
 
-    void (async () => {
-      const result = await resolveAuthSession();
-      if (result.status !== "authenticated") return;
-      const name = await enrichDisplayName(result.user.id);
-      if (name) {
-        setCurrentUser(name);
-      }
-    })();
+    const access = await requestAuthQuerySync();
+    if (access.status === "ready") {
+      setCurrentUser(access.displayName ?? displayNameFromEmail(email));
+      setAuthErrorMessage(null);
+      setPhase("loading");
+      return;
+    }
+    if (access.status === "revoked") {
+      setAuthErrorMessage(
+        "This account is not linked to an active BioReserve profile.",
+      );
+      setPhase("authError");
+    }
   }, []);
 
   const handleChangeUser = useCallback(async () => {
@@ -219,17 +247,17 @@ export function BioReserveShell() {
       const supabase = getSupabaseBrowserClient();
       const { error } = await supabase.auth.signOut({ scope: "local" });
       if (error) {
+        void requestAuthQuerySync();
         setSignOutError("Unable to sign out of this workstation. Please try again.");
         return;
       }
 
-      const { data, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError || data.session) {
+      const access = await requestAuthQuerySync();
+      if (access.status !== "anonymous") {
         setSignOutError("Unable to sign out of this workstation. Please try again.");
         return;
       }
 
-      clearBrowserQueryCache();
       resetWindows();
       setSessionStatus("anonymous");
       setCurrentUser("User");
@@ -237,6 +265,7 @@ export function BioReserveShell() {
       setAuthErrorMessage(null);
       setPhase("login");
     } catch {
+      void requestAuthQuerySync();
       setSignOutError("Unable to sign out of this workstation. Please try again.");
     }
   }, [resetWindows]);
@@ -258,19 +287,46 @@ export function BioReserveShell() {
     writeSoundEnabled(!readSoundEnabled());
   }, []);
 
-  if (phase === "fullscreen") {
+  let effectivePhase = phase;
+  if (phase === "desktop" && authAccess.status !== "ready") {
+    effectivePhase = authAccess.status === "anonymous" ? "login" : "accessSuspended";
+  } else if (
+    phase === "accessSuspended" ||
+    phase === "authError" ||
+    phase === "awaitingSession"
+  ) {
+    // Intermediate or superseded check results cannot strand boot or recovery.
+    // Presentation follows the latest authoritative snapshot on every render.
+    if (phase !== "awaitingSession" || authAccess.status === "suspended") {
+      effectivePhase = "accessSuspended";
+    }
+    if (authAccess.status === "ready") effectivePhase = resumePhase;
+    if (authAccess.status === "anonymous") effectivePhase = "login";
+    if (authAccess.status === "revoked") effectivePhase = "authError";
+  }
+
+  if (effectivePhase === "fullscreen") {
     return <FullscreenPrompt onContinue={startBootCycle} />;
   }
 
-  if (phase === "boot") {
+  if (effectivePhase === "boot") {
     return <BootSequence onComplete={handleBootComplete} />;
   }
 
-  if (phase === "awaitingSession") {
+  if (effectivePhase === "awaitingSession") {
     return <div className="h-full w-full bg-black" aria-busy="true" />;
   }
 
-  if (phase === "authError") {
+  if (effectivePhase === "accessSuspended") {
+    return (
+      <AuthErrorScreen
+        title="Authentication.exe"
+        message="Verifying identity and profile access. Protected access is suspended."
+      />
+    );
+  }
+
+  if (effectivePhase === "authError") {
     return (
       <AuthErrorScreen
         title="Authentication.exe"
@@ -282,7 +338,7 @@ export function BioReserveShell() {
     );
   }
 
-  if (phase === "login") {
+  if (effectivePhase === "login") {
     return (
       <LoginDialog
         onExecute={handleExecute}
@@ -291,7 +347,7 @@ export function BioReserveShell() {
     );
   }
 
-  if (phase === "register") {
+  if (effectivePhase === "register") {
     return (
       <RegisterDialog
         onCancel={() => setPhase("login")}
@@ -300,16 +356,16 @@ export function BioReserveShell() {
     );
   }
 
-  if (phase === "welcome") {
+  if (effectivePhase === "welcome") {
     return (
       <WelcomeBackDialog
-        displayName={welcomeDisplayName}
+        displayName={authAccess.displayName ?? welcomeDisplayName}
         onComplete={handleWelcomeComplete}
       />
     );
   }
 
-  if (phase === "loading") {
+  if (effectivePhase === "loading") {
     return <DesktopLoading onComplete={() => setPhase("desktop")} />;
   }
 
@@ -326,7 +382,7 @@ export function BioReserveShell() {
         />
       </div>
       <Taskbar
-        currentUser={currentUser}
+        currentUser={authAccess.displayName ?? currentUser}
         windows={windows}
         activeId={activeId}
         locale={locale}

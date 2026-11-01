@@ -10,7 +10,7 @@ const SERVICE_UNAVAILABLE_MESSAGE =
   "Authentication service unavailable. Please try again.";
 
 type LoginDialogProps = {
-  onExecute: (email: string) => void;
+  onExecute: (email: string) => Promise<void>;
   onCreateUser: () => void;
 };
 
@@ -49,7 +49,7 @@ export function LoginDialog({ onExecute, onCreateUser }: LoginDialogProps) {
         return;
       }
 
-      onExecute(data.user?.email ?? trimmedEmail);
+      await onExecute(data.user?.email ?? trimmedEmail);
     } catch {
       setError(SERVICE_UNAVAILABLE_MESSAGE);
     } finally {

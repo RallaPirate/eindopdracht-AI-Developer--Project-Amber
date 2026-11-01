@@ -59,6 +59,11 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   another user's cache.
   Must be completed before Step 3.1 introduces private
   cached queries.
+  Authenticated reads and writes go through
+  `useAuthenticatedQuery` / `useAuthenticatedMutation`.
+  The browser cache binds to the verified Auth user id
+  from `getClaims()`, and a `profiles.role` change removes
+  cached rows for that same user. `initialData` is not restored.
 
 
 

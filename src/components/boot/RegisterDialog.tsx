@@ -29,7 +29,7 @@ type FieldErrors = {
 
 type RegisterDialogProps = {
   onCancel: () => void;
-  onExecute: (email: string) => void;
+  onExecute: (email: string) => Promise<void>;
 };
 
 function validateForm(
@@ -137,7 +137,7 @@ export function RegisterDialog({ onCancel, onExecute }: RegisterDialogProps) {
       }
 
       if (data.session) {
-        onExecute(data.user?.email ?? trimmedEmail);
+        await onExecute(data.user?.email ?? trimmedEmail);
         return;
       }
 
