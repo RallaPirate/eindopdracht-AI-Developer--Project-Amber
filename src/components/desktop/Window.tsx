@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useEffect,
   useRef,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -38,10 +39,15 @@ export function Window({
   maxHeight,
 }: WindowProps) {
   const dragOffset = useRef({ x: 0, y: 0 });
+  const stopDrag = useRef<(() => void) | null>(null);
+  // Activity cleans up Effects when verification hides the desktop. A drag
+  // started before that boundary must not keep global mouse listeners alive.
+  useEffect(() => () => stopDrag.current?.(), []);
 
   function startDrag(event: ReactMouseEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
     event.preventDefault();
+    stopDrag.current?.();
     onFocus();
 
     dragOffset.current = {
@@ -59,8 +65,10 @@ export function Window({
     function onMouseUp() {
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
+      stopDrag.current = null;
     }
 
+    stopDrag.current = onMouseUp;
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
   }

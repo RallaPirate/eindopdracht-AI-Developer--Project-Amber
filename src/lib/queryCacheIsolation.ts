@@ -54,6 +54,9 @@ export type AuthAccessSnapshot = Readonly<{
   role: string | null;
   displayName: string | null;
   accessEpoch: number;
+  // Presentation ownership is never an authorization capability. Unlike the
+  // cache epoch it survives temporary same-user verification and suspension.
+  presentation: Readonly<{ id: number; userId: string; role: string }> | null;
 }>;
 
 export type AuthenticatedAccess = {
@@ -220,6 +223,8 @@ function isAuthenticatedQuery(queryKey: readonly unknown[]): boolean {
  * cached rows. Cancellation does not undo a write the server already committed.
  */
 export function createAuthenticatedQueryCache() {
+  let presentationId = 0;
+  let presentation: AuthAccessSnapshot["presentation"] = null;
   let snapshot: AuthAccessSnapshot = Object.freeze({
     status: "unverified",
     userId: null,
@@ -227,6 +232,7 @@ export function createAuthenticatedQueryCache() {
     role: null,
     displayName: null,
     accessEpoch: 0,
+    presentation: null,
   });
   const listeners = new Set<IdentityListener>();
   const guardedClients = new WeakSet<QueryClient>();
@@ -249,12 +255,13 @@ export function createAuthenticatedQueryCache() {
   }
 
   function publish(
-    next: Omit<AuthAccessSnapshot, "accessEpoch">,
+    next: Omit<AuthAccessSnapshot, "accessEpoch" | "presentation">,
     bumpEpoch: boolean,
   ) {
     snapshot = Object.freeze({
       ...next,
       accessEpoch: snapshot.accessEpoch + (bumpEpoch ? 1 : 0),
+      presentation,
     });
     emit();
   }
@@ -325,7 +332,10 @@ export function createAuthenticatedQueryCache() {
 
   /** Synchronously blocks access while an Auth event is being verified. */
   function beginVerification(client: QueryClient) {
-    if (snapshot.status === "unverified" && snapshot.userId === null) return;
+    if (
+      snapshot.status === "unverified" && snapshot.userId === null &&
+      snapshot.presentation === presentation
+    ) return;
     publish(
       {
         status: "unverified",
@@ -346,6 +356,9 @@ export function createAuthenticatedQueryCache() {
    * A real identity change also bumps the access epoch.
    */
   function bindUser(client: QueryClient, nextUserId: string | null) {
+    if (nextUserId === null || presentation?.userId !== nextUserId) {
+      presentation = null;
+    }
     if (
       snapshot.userId === nextUserId &&
       (nextUserId !== null || snapshot.status === "anonymous")
@@ -373,7 +386,8 @@ export function createAuthenticatedQueryCache() {
    * A different session user unbinds immediately; verification binds the id later.
    */
   function noteReauthentication(client: QueryClient, sessionUserId: string) {
-    void sessionUserId;
+    // An event's unverified id may discard a presentation, never authorize it.
+    if (presentation?.userId !== sessionUserId) presentation = null;
     beginVerification(client);
   }
 
@@ -400,6 +414,14 @@ export function createAuthenticatedQueryCache() {
     const roleChanged =
       snapshot.permissionStatus === "active" &&
       snapshot.role !== nextPermissionScope;
+    if (
+      !presentation || presentation.userId !== nextUserId ||
+      presentation.role !== nextPermissionScope
+    ) {
+      presentation = Object.freeze({
+        id: ++presentationId, userId: nextUserId, role: nextPermissionScope,
+      });
+    }
     publish(
       {
         status: "ready",
@@ -420,6 +442,8 @@ export function createAuthenticatedQueryCache() {
   function revokePermission(client: QueryClient, nextUserId: string) {
     if (snapshot.userId !== nextUserId) return;
     if (snapshot.permissionStatus === "revoked") return;
+
+    presentation = null;
 
     publish(
       {
