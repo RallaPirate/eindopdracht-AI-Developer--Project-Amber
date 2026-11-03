@@ -18,6 +18,8 @@ type WindowProps = {
   children?: ReactNode;
   width?: number;
   height?: number;
+  maxWidth?: number | string;
+  maxHeight?: number | string;
 };
 
 export function Window({
@@ -32,6 +34,8 @@ export function Window({
   children,
   width = 420,
   height = 300,
+  maxWidth,
+  maxHeight,
 }: WindowProps) {
   const dragOffset = useRef({ x: 0, y: 0 });
 
@@ -68,7 +72,7 @@ export function Window({
   return (
     <div
       className="os-bevel-out absolute flex flex-col bg-[var(--os-window-face)] p-1 text-[var(--os-button-text)]"
-      style={{ left: x, top: y, zIndex, width, height }}
+      style={{ left: x, top: y, zIndex, width, height, maxWidth, maxHeight }}
       onMouseDown={onFocus}
     >
       <div
