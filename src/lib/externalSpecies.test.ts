@@ -235,7 +235,9 @@ describe("getExternalSpecies", { concurrency: 1 }, () => {
       assert.equal(malformed.error.message, "The external species data is invalid.");
     }
 
-    installFetch(() => jsonResponse(speciesRecord({ hybrid: "false", geological_period: 90 })));
+    installFetch(() =>
+      jsonResponse([speciesRecord({ hybrid: "false", geological_period: 90 })]),
+    );
     const invalid = await getExternalSpecies("abelisaurus");
     assert.equal(invalid.ok, false);
     if (!invalid.ok) {
@@ -244,15 +246,28 @@ describe("getExternalSpecies", { concurrency: 1 }, () => {
     }
 
     installFetch(() =>
-      jsonResponse(
+      jsonResponse([
         speciesRecord({
           franchise_origins: ["jurassic-park", 3],
         }),
-      ),
+      ]),
     );
     const badArray = await getExternalSpecies("abelisaurus");
     assert.equal(badArray.ok, false);
-    if (!badArray.ok) assert.equal(badArray.error.code, "validation");
+    if (!badArray.ok) {
+      assert.equal(badArray.error.code, "validation");
+      assert.equal(badArray.error.message, "The external species data is invalid.");
+    }
+
+    const missingField = speciesRecord();
+    delete missingField.scientific_name;
+    installFetch(() => jsonResponse([missingField]));
+    const incomplete = await getExternalSpecies("abelisaurus");
+    assert.equal(incomplete.ok, false);
+    if (!incomplete.ok) {
+      assert.equal(incomplete.error.code, "validation");
+      assert.equal(incomplete.error.message, "The external species data is invalid.");
+    }
   });
 
   test("rejects a record whose id does not match the request", async () => {
