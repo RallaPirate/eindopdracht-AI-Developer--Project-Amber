@@ -77,7 +77,7 @@ type AuthenticatedMutationResult<TData, TError, TVariables, TOnMutateResult> =
     mutateAsync: (...args: MutationCallArgs<TData, TError, TVariables, TOnMutateResult>) => Promise<TData>;
   };
 
-function useVerifiedAuthSnapshot(): AuthAccessSnapshot {
+export function useVerifiedAuthSnapshot(): AuthAccessSnapshot {
   return useSyncExternalStore(
     subscribeVerifiedAuthSnapshot,
     getVerifiedAuthSnapshot,

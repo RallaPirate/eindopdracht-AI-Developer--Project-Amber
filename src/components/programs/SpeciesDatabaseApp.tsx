@@ -1,8 +1,18 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import { useAuthenticatedQuery } from "@/hooks/useAuthenticatedQuery";
+import { SpeciesProposalPanel } from "@/components/programs/SpeciesProposalPanel";
+import {
+  canOfferSpeciesProposal,
+  sameManagementAccess,
+} from "@/components/programs/speciesProposalView";
+import {
+  useAuthenticatedQuery,
+  useVerifiedAuthSnapshot,
+} from "@/hooks/useAuthenticatedQuery";
 import { toUserMessage } from "@/lib/appResult";
+import { requestFreshAuthQuerySync } from "@/lib/authQueryIsolation";
+import { getVerifiedAuthSnapshot } from "@/lib/queryClient";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 import {
   fetchLocalSpecies,
@@ -13,6 +23,82 @@ import {
 } from "@/components/programs/speciesDatabaseView";
 
 export function SpeciesDatabaseApp() {
+  const access = useVerifiedAuthSnapshot();
+  const canPropose = canOfferSpeciesProposal(access);
+  const [requestedTab, setRequestedTab] = useState<"browse" | "propose">("browse");
+  if (!canPropose && requestedTab !== "browse") {
+    setRequestedTab("browse");
+  }
+  const tab = canPropose && requestedTab === "propose" ? "propose" : "browse";
+
+  async function openProposal() {
+    const started = getVerifiedAuthSnapshot();
+    if (!canOfferSpeciesProposal(started)) return;
+    const verified = await requestFreshAuthQuerySync();
+    const after = getVerifiedAuthSnapshot();
+    if (!verified || !sameManagementAccess(started, verified, after)) return;
+    setRequestedTab("propose");
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden text-sm text-[var(--os-text)]">
+      {canPropose ? (
+        <div role="tablist" aria-label="Species database" className="mb-2 flex shrink-0 gap-1">
+          <TabButton
+            selected={tab === "browse"}
+            onClick={() => setRequestedTab("browse")}
+          >
+            Browse Species
+          </TabButton>
+          <TabButton
+            selected={tab === "propose"}
+            onClick={() => {
+              void openProposal();
+            }}
+          >
+            New Species Proposal
+          </TabButton>
+        </div>
+      ) : null}
+      <div className={tab === "browse" ? "contents" : "hidden"}>
+        <SpeciesBrowser />
+      </div>
+      {tab === "propose" ? <SpeciesProposalPanel /> : null}
+      <footer className="mt-2 flex shrink-0 items-center justify-between border-t border-[var(--os-border-dark)] pt-1 text-xs">
+        <span>CONFIDENTIAL</span>
+        <span>© Project Amber</span>
+      </footer>
+    </div>
+  );
+}
+
+function TabButton({
+  selected,
+  onClick,
+  children,
+}: {
+  selected: boolean;
+  onClick: () => void;
+  children: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={selected}
+      onClick={onClick}
+      className={`px-2 py-0.5 text-sm ${
+        selected
+          ? "os-bevel-in bg-[var(--os-button-face)] text-[var(--os-button-text)]"
+          : "os-bevel-button"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SpeciesBrowser() {
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const speciesQuery = useAuthenticatedQuery({
@@ -47,7 +133,7 @@ export function SpeciesDatabaseApp() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden text-sm text-[var(--os-text)]">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <label className="mb-2 block shrink-0">
         <span className="mb-1 block">Search</span>
         <input
@@ -86,11 +172,6 @@ export function SpeciesDatabaseApp() {
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">{main}</div>
       </div>
-
-      <footer className="mt-2 flex shrink-0 items-center justify-between border-t border-[var(--os-border-dark)] pt-1 text-xs">
-        <span>CONFIDENTIAL</span>
-        <span>© Project Amber</span>
-      </footer>
     </div>
   );
 }

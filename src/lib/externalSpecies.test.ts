@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, test } from "node:test";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { SAFE_ERROR_MESSAGES } from "./appResult.ts";
-import { getExternalSpecies, type ExternalSpecies } from "./externalSpecies.ts";
+import type { CurrentProfileResult } from "./currentProfile.ts";
+import type { ApplicationRole } from "../types/database.ts";
+import {
+  EXTERNAL_SPECIES_LOOKUP_LIMIT,
+  EXTERNAL_SPECIES_NAME_MAX_LENGTH,
+  EXTERNAL_SPECIES_NAME_RAW_MAX_LENGTH,
+  getExternalSpecies,
+  lookupExternalSpeciesByName,
+  type ExternalSpecies,
+} from "./externalSpecies.ts";
+import { handleSpeciesLookupGet } from "./speciesLookupEndpoint.ts";
 
 const ENV_KEYS = [
   "EXTERNAL_SPECIES_SUPABASE_URL",
@@ -339,5 +350,520 @@ describe("getExternalSpecies", { concurrency: 1 }, () => {
     if (!insecure.ok) assert.equal(insecure.error.code, "unexpected");
 
     assert.equal(requests.length, 0);
+  });
+});
+
+describe("lookupExternalSpeciesByName", { concurrency: 1 }, () => {
+  test("returns the external id and scientific name for a matching name", async () => {
+    installFetch(() =>
+      jsonResponse([
+        {
+          id: "tyrannosaurus-rex",
+          scientific_name: "Tyrannosaurus rex",
+          diet_profile: "carnivore",
+          general_care_recommendations: "Do not disclose this field.",
+        },
+      ]),
+    );
+
+    const result = await lookupExternalSpeciesByName("  Tyrannosaurus   Rex  ");
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.deepEqual(result.data, [
+      {
+        id: "tyrannosaurus-rex",
+        scientific_name: "Tyrannosaurus rex",
+      },
+    ]);
+    assert.equal(JSON.stringify(result).includes("carnivore"), false);
+    assert.equal(JSON.stringify(result).includes("Do not disclose"), false);
+    assert.equal(requests.length, 1);
+  });
+
+  test("searches case-insensitively and keeps the returned name unchanged", async () => {
+    installFetch(() =>
+      jsonResponse([
+        { id: "tyrannosaurus-rex", scientific_name: "Tyrannosaurus rex" },
+      ]),
+    );
+
+    const result = await lookupExternalSpeciesByName("tyrannosaurus rex");
+
+    assert.deepEqual(result, {
+      ok: true,
+      data: [{ id: "tyrannosaurus-rex", scientific_name: "Tyrannosaurus rex" }],
+    });
+    const url = new URL(requests[0].url);
+    assert.equal(
+      url.searchParams.get("scientific_name"),
+      "ilike.*tyrannosaurus rex*",
+    );
+  });
+
+  test("requests a partial ilike match", async () => {
+    installFetch(() =>
+      jsonResponse([
+        { id: "tyrannosaurus-rex", scientific_name: "Tyrannosaurus rex" },
+      ]),
+    );
+
+    const result = await lookupExternalSpeciesByName("saurus");
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.data[0]?.id, "tyrannosaurus-rex");
+    const url = new URL(requests[0].url);
+    assert.equal(url.searchParams.get("scientific_name"), "ilike.*saurus*");
+  });
+
+  test("orders multiple matches by scientific name and then id", async () => {
+    installFetch(() =>
+      jsonResponse([
+        { id: "zuniceratops", scientific_name: "Zuniceratops christopheri" },
+        { id: "tyrannosaurus-rex", scientific_name: "Tyrannosaurus rex" },
+        { id: "tyrannosaurus", scientific_name: "Tyrannosaurus rex" },
+      ]),
+    );
+
+    const result = await lookupExternalSpeciesByName("saurus");
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.deepEqual(
+      result.data.map((match) => match.id),
+      ["tyrannosaurus", "tyrannosaurus-rex", "zuniceratops"],
+    );
+    const url = new URL(requests[0].url);
+    assert.equal(url.searchParams.get("order"), "scientific_name.asc,id.asc");
+    assert.equal(url.searchParams.get("limit"), String(EXTERNAL_SPECIES_LOOKUP_LIMIT));
+  });
+
+  test("returns an empty success when nothing matches", async () => {
+    installFetch(() => jsonResponse([]));
+
+    const result = await lookupExternalSpeciesByName("Notasaurus");
+
+    assert.deepEqual(result, { ok: true, data: [] });
+    assert.equal(requests.length, 1);
+  });
+
+  test("rejects empty, malformed, oversized and unsafe names before any request", async () => {
+    installFetch(() => jsonResponse([]));
+    const samples: unknown[] = [
+      "",
+      "   ",
+      "A",
+      "a".repeat(EXTERNAL_SPECIES_NAME_MAX_LENGTH + 1),
+      "Tyrannosaurus*",
+      "Tyrannosaurus%",
+      "Tyrannosaurus_",
+      "Tyrannosaurus.rex",
+      "rex,or",
+      "or(id.eq.abelisaurus)",
+      "name:eq",
+      "Rex/id",
+      "Rex\nrex",
+      "Rex\u0000",
+      "T. rex",
+      null,
+      12,
+      { scientific_name: "Tyrannosaurus rex" },
+    ];
+
+    for (const sample of samples) {
+      const result = await lookupExternalSpeciesByName(sample);
+      assert.equal(result.ok, false, JSON.stringify(sample));
+      if (result.ok) continue;
+      assert.equal(result.error.code, "validation", JSON.stringify(sample));
+      assert.equal(result.error.message, "Species name is invalid.");
+    }
+
+    assert.equal(requests.length, 0);
+  });
+
+  test("accepts a name at the maximum length", async () => {
+    const name = `A${"b".repeat(EXTERNAL_SPECIES_NAME_MAX_LENGTH - 1)}`;
+    installFetch(() => jsonResponse([]));
+
+    const result = await lookupExternalSpeciesByName(name);
+
+    assert.deepEqual(result, { ok: true, data: [] });
+    const url = new URL(requests[0].url);
+    assert.equal(url.searchParams.get("scientific_name"), `ilike.*${name}*`);
+  });
+
+  test("trims an 80-character name before applying the length limit", async () => {
+    const name = `A${"b".repeat(EXTERNAL_SPECIES_NAME_MAX_LENGTH - 1)}`;
+    installFetch(() => jsonResponse([]));
+
+    const result = await lookupExternalSpeciesByName(` ${name}`);
+
+    assert.deepEqual(result, { ok: true, data: [] });
+    const url = new URL(requests[0].url);
+    assert.equal(url.searchParams.get("scientific_name"), `ilike.*${name}*`);
+  });
+
+  test("rejects raw text above the separate request-size limit before any request", async () => {
+    const padded = `${" ".repeat(EXTERNAL_SPECIES_NAME_RAW_MAX_LENGTH)}Rex`;
+    installFetch(() => jsonResponse([]));
+
+    const result = await lookupExternalSpeciesByName(padded);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error.code, "validation");
+      assert.equal(result.error.message, "Species name is invalid.");
+    }
+    assert.equal(requests.length, 0);
+  });
+
+  test("maps upstream failures, timeouts and invalid shapes without leaking details", async () => {
+    installFetch(() => jsonResponse({ message: "secret upstream detail" }, 401));
+    const denied = await lookupExternalSpeciesByName("Rex");
+    assert.equal(denied.ok, false);
+    if (!denied.ok) {
+      assert.equal(denied.error.code, "unauthorized");
+      assert.equal(denied.error.message, SAFE_ERROR_MESSAGES.unauthorized);
+      assert.equal(denied.error.message.includes("secret"), false);
+    }
+
+    installFetch(() => new Response("nope", { status: 500 }));
+    const failed = await lookupExternalSpeciesByName("Rex");
+    assert.equal(failed.ok, false);
+    if (!failed.ok) {
+      assert.equal(failed.error.message, "The external species service is unavailable.");
+      assert.equal(failed.error.message.includes("nope"), false);
+    }
+
+    installFetch(() => {
+      throw new TypeError("connect ECONNREFUSED 10.1.2.3");
+    });
+    const network = await lookupExternalSpeciesByName("Rex");
+    assert.equal(network.ok, false);
+    if (!network.ok) {
+      assert.equal(network.error.message, "The external species service is unavailable.");
+      assert.equal(network.error.message.includes("10.1.2.3"), false);
+    }
+
+    installFetch(() => {
+      throw new DOMException("The operation timed out", "TimeoutError");
+    });
+    const timedOut = await lookupExternalSpeciesByName("Rex");
+    assert.equal(timedOut.ok, false);
+    if (!timedOut.ok) {
+      assert.equal(timedOut.error.message, "The external species request timed out.");
+    }
+
+    installFetch(() => {
+      throw new DOMException("The operation was aborted", "AbortError");
+    });
+    const aborted = await lookupExternalSpeciesByName("Rex");
+    assert.equal(aborted.ok, false);
+    if (!aborted.ok) {
+      assert.equal(aborted.error.message, "The external species request timed out.");
+    }
+
+    installFetch(() => new Response("{", { status: 200 }));
+    const malformed = await lookupExternalSpeciesByName("Rex");
+    assert.equal(malformed.ok, false);
+    if (!malformed.ok) {
+      assert.equal(malformed.error.code, "unexpected");
+      assert.equal(malformed.error.message, "The external species data is invalid.");
+      assert.equal(malformed.error.message.includes("{"), false);
+    }
+
+    installFetch(() => new Response("missing route", { status: 404 }));
+    const missingRoute = await lookupExternalSpeciesByName("Rex");
+    assert.equal(missingRoute.ok, false);
+    if (!missingRoute.ok) {
+      assert.equal(missingRoute.error.code, "unexpected");
+      assert.equal(
+        missingRoute.error.message,
+        "The external species service is unavailable.",
+      );
+      assert.equal(missingRoute.error.message.includes("missing route"), false);
+    }
+
+    installFetch(() => jsonResponse({ id: "tyrannosaurus-rex" }));
+    const objectBody = await lookupExternalSpeciesByName("Rex");
+    assert.equal(objectBody.ok, false);
+    if (!objectBody.ok) {
+      assert.equal(objectBody.error.code, "unexpected");
+      assert.equal(objectBody.error.message, "The external species data is invalid.");
+    }
+
+    installFetch(() =>
+      jsonResponse([{ id: "Tyrannosaurus", scientific_name: "Tyrannosaurus rex" }]),
+    );
+    const rewrittenId = await lookupExternalSpeciesByName("Rex");
+    assert.equal(rewrittenId.ok, false);
+    if (!rewrittenId.ok) {
+      assert.equal(rewrittenId.error.code, "unexpected");
+      assert.equal(rewrittenId.error.message, "The external species data is invalid.");
+      assert.equal(rewrittenId.error.message.includes("Tyrannosaurus"), false);
+    }
+
+    installFetch(() =>
+      jsonResponse([{ id: "tyrannosaurus-rex", scientific_name: "" }]),
+    );
+    const emptyName = await lookupExternalSpeciesByName("Rex");
+    assert.equal(emptyName.ok, false);
+    if (!emptyName.ok) {
+      assert.equal(emptyName.error.code, "unexpected");
+      assert.equal(emptyName.error.message, "The external species data is invalid.");
+    }
+
+    installFetch(() =>
+      jsonResponse(
+        Array.from({ length: EXTERNAL_SPECIES_LOOKUP_LIMIT + 1 }, (_, index) => ({
+          id: `species-${index}`,
+          scientific_name: `Species ${index}`,
+        })),
+      ),
+    );
+    const tooMany = await lookupExternalSpeciesByName("Species");
+    assert.equal(tooMany.ok, false);
+    if (!tooMany.ok) {
+      assert.equal(tooMany.error.code, "unexpected");
+      assert.equal(tooMany.error.message, "The external species data is invalid.");
+    }
+  });
+
+  test("calls only the fixed species endpoint with the external publishable key", async () => {
+    installFetch(() => jsonResponse([]));
+
+    const result = await lookupExternalSpeciesByName("Tyrannosaurus Rex");
+    assert.equal(result.ok, true);
+    assert.equal(requests.length, 1);
+
+    const request = requests[0];
+    const url = new URL(request.url);
+    assert.equal(request.method, "GET");
+    assert.equal(request.cache, "no-store");
+    assert.equal(request.redirect, "error");
+    assert.equal(url.origin, EXTERNAL_ORIGIN);
+    assert.equal(url.pathname, "/rest/v1/species");
+    assert.equal(url.searchParams.get("id"), null);
+    assert.equal(
+      url.searchParams.get("scientific_name"),
+      "ilike.*Tyrannosaurus Rex*",
+    );
+    assert.equal(url.searchParams.get("select"), "id,scientific_name");
+    assert.equal(url.searchParams.get("order"), "scientific_name.asc,id.asc");
+    assert.equal(url.searchParams.get("limit"), "10");
+    assert.equal([...url.searchParams.keys()].length, 4);
+    assert.equal(request.headers.get("apikey"), PUBLISHABLE_KEY);
+    assert.equal(request.headers.get("authorization"), null);
+    assert.equal(request.headers.get("apikey") === MAIN_APP_KEY, false);
+    const headerValues = [...request.headers.values()].join(" ");
+    assert.equal(headerValues.includes("service_role"), false);
+    assert.equal(headerValues.includes(MAIN_APP_KEY), false);
+    assert.equal(headerValues.includes("NEXT_PUBLIC"), false);
+  });
+
+  test("does not call the network when configuration is missing or points elsewhere", async () => {
+    delete process.env.EXTERNAL_SPECIES_SUPABASE_PUBLISHABLE_KEY;
+    installFetch(() => jsonResponse([]));
+
+    const missing = await lookupExternalSpeciesByName("Rex");
+    assert.equal(missing.ok, false);
+    if (!missing.ok) {
+      assert.equal(missing.error.message, "The external species service is not configured.");
+    }
+
+    process.env.EXTERNAL_SPECIES_SUPABASE_PUBLISHABLE_KEY = PUBLISHABLE_KEY;
+    process.env.EXTERNAL_SPECIES_SUPABASE_URL = "https://evil.example/rest/v1/species";
+    const foreign = await lookupExternalSpeciesByName("Rex");
+    assert.equal(foreign.ok, false);
+    if (!foreign.ok) {
+      assert.equal(foreign.error.message, "The external species service is not configured.");
+    }
+
+    process.env.EXTERNAL_SPECIES_SUPABASE_URL =
+      "https://mwewivvwhdittuffkcrr.supabase.co.evil.example";
+    const lookalike = await lookupExternalSpeciesByName("Rex");
+    assert.equal(lookalike.ok, false);
+    if (!lookalike.ok) assert.equal(lookalike.error.code, "unexpected");
+
+    assert.equal(requests.length, 0);
+  });
+});
+
+describe("lookup route with the real species client", { concurrency: 1 }, () => {
+  function caller(role: ApplicationRole): CurrentProfileResult {
+    return {
+      status: "ok",
+      supabase: {} as SupabaseClient,
+      authUserId: "auth-user-1",
+      profileId: "profile-1",
+      role,
+    };
+  }
+
+  function requestFor(name: string): Request {
+    return new Request(
+      `https://amber.test/api/species/lookup?name=${encodeURIComponent(name)}`,
+      {
+        method: "GET",
+        headers: {
+          origin: "https://amber.test",
+          "sec-fetch-site": "same-origin",
+        },
+      },
+    );
+  }
+
+  test("denied roles make zero external API calls", async () => {
+    installFetch(() => jsonResponse([]));
+
+    for (const role of ["employee", "senior"] as const) {
+      const response = await handleSpeciesLookupGet(requestFor("Rex"), {
+        getCurrentProfile: async () => caller(role),
+        lookupSpeciesByName: lookupExternalSpeciesByName,
+      });
+      const body = (await response.json()) as {
+        ok?: boolean;
+        data?: unknown;
+        error?: { code?: string };
+      };
+      assert.equal(response.status, 403, role);
+      assert.equal(body.error?.code, "unauthorized", role);
+      assert.equal(body.data, undefined, role);
+      assert.equal(response.headers.get("cache-control"), "no-store", role);
+    }
+
+    const unauthenticated = await handleSpeciesLookupGet(requestFor("Rex"), {
+      getCurrentProfile: async () => ({ status: "unauthenticated" }),
+      lookupSpeciesByName: lookupExternalSpeciesByName,
+    });
+    assert.equal(unauthenticated.status, 401);
+    assert.equal(requests.length, 0);
+    assert.equal(
+      JSON.stringify(await unauthenticated.json()).includes(PUBLISHABLE_KEY),
+      false,
+    );
+  });
+
+  test("management receives the external id without the publishable key", async () => {
+    installFetch(() =>
+      jsonResponse([
+        {
+          id: "tyrannosaurus-rex",
+          scientific_name: "Tyrannosaurus rex",
+          diet_profile: "carnivore",
+        },
+      ]),
+    );
+
+    const response = await handleSpeciesLookupGet(requestFor("Rex"), {
+      getCurrentProfile: async () => caller("management"),
+      lookupSpeciesByName: lookupExternalSpeciesByName,
+    });
+    const body = (await response.json()) as {
+      ok?: boolean;
+      data?: Array<{ external_species_id: string; scientific_name: string }>;
+    };
+    const serialised = JSON.stringify(body);
+
+    assert.equal(response.status, 200);
+    assert.equal(requests.length, 1);
+    assert.deepEqual(body.data, [
+      {
+        external_species_id: "tyrannosaurus-rex",
+        scientific_name: "Tyrannosaurus rex",
+      },
+    ]);
+    assert.equal(serialised.includes(PUBLISHABLE_KEY), false);
+    assert.equal(serialised.includes("carnivore"), false);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(requests[0]?.headers.get("apikey"), PUBLISHABLE_KEY);
+    assert.equal(requests[0]?.headers.get("apikey") === MAIN_APP_KEY, false);
+  });
+
+  test("classifies upstream lookup failures separately from a valid empty search", async () => {
+    const name = `A${"b".repeat(EXTERNAL_SPECIES_NAME_MAX_LENGTH - 1)}`;
+    installFetch(() => jsonResponse([]));
+    const padded = await handleSpeciesLookupGet(
+      requestFor(` ${name}`),
+      {
+        getCurrentProfile: async () => caller("management"),
+        lookupSpeciesByName: lookupExternalSpeciesByName,
+      },
+    );
+    assert.equal(padded.status, 200);
+    assert.deepEqual(await padded.json(), { ok: true, data: [] });
+    assert.equal(requests.length, 1);
+    assert.equal(
+      new URL(requests[0].url).searchParams.get("scientific_name"),
+      `ilike.*${name}*`,
+    );
+
+    installFetch(() => jsonResponse([]));
+    const empty = await handleSpeciesLookupGet(requestFor("Notasaurus"), {
+      getCurrentProfile: async () => caller("management"),
+      lookupSpeciesByName: lookupExternalSpeciesByName,
+    });
+    assert.equal(empty.status, 200);
+    assert.deepEqual(await empty.json(), { ok: true, data: [] });
+
+    installFetch(() => new Response("{", { status: 200 }));
+    const malformed = await handleSpeciesLookupGet(requestFor("Rex"), {
+      getCurrentProfile: async () => caller("management"),
+      lookupSpeciesByName: lookupExternalSpeciesByName,
+    });
+    const malformedBody = (await malformed.json()) as {
+      error?: { code?: string; message?: string };
+    };
+    assert.equal(malformed.status, 502);
+    assert.equal(malformedBody.error?.code, "unexpected");
+    assert.equal(
+      malformedBody.error?.message,
+      "The external species data is invalid.",
+    );
+    assert.equal(malformedBody.error?.message?.includes("{"), false);
+    assert.equal(malformed.headers.get("cache-control"), "no-store");
+
+    installFetch(() =>
+      jsonResponse([{ id: "Not A Slug", scientific_name: "Tyrannosaurus rex" }]),
+    );
+    const invalidRow = await handleSpeciesLookupGet(requestFor("Rex"), {
+      getCurrentProfile: async () => caller("management"),
+      lookupSpeciesByName: lookupExternalSpeciesByName,
+    });
+    const invalidBody = (await invalidRow.json()) as {
+      error?: { code?: string; message?: string };
+    };
+    assert.equal(invalidRow.status, 502);
+    assert.equal(invalidBody.error?.code, "unexpected");
+    assert.equal(invalidBody.error?.message, "The external species data is invalid.");
+    assert.equal(JSON.stringify(invalidBody).includes("Not A Slug"), false);
+
+    installFetch(() => new Response("no such route", { status: 404 }));
+    const missing = await handleSpeciesLookupGet(requestFor("Rex"), {
+      getCurrentProfile: async () => caller("management"),
+      lookupSpeciesByName: lookupExternalSpeciesByName,
+    });
+    const missingBody = (await missing.json()) as {
+      error?: { code?: string; message?: string };
+    };
+    assert.equal(missing.status, 502);
+    assert.equal(missingBody.error?.code, "unexpected");
+    assert.equal(
+      missingBody.error?.message,
+      "The external species service is unavailable.",
+    );
+    assert.equal(JSON.stringify(missingBody).includes("no such route"), false);
+    assert.equal(JSON.stringify(missingBody).includes("not found"), false);
+
+    const invalidName = await handleSpeciesLookupGet(requestFor("R"), {
+      getCurrentProfile: async () => caller("management"),
+      lookupSpeciesByName: lookupExternalSpeciesByName,
+    });
+    const invalidNameBody = (await invalidName.json()) as {
+      error?: { code?: string };
+    };
+    assert.equal(invalidName.status, 400);
+    assert.equal(invalidNameBody.error?.code, "validation");
   });
 });

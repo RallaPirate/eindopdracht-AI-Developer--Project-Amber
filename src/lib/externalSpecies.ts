@@ -1,4 +1,4 @@
-import { err, ok, type AppResult } from "./appResult.ts";
+import { err, ok, type AppError, type AppResult } from "./appResult.ts";
 
 /**
  * One record from the external Species API (`public.species`).
@@ -24,6 +24,18 @@ const SPECIES_PATH = "/rest/v1/species";
 const REQUEST_TIMEOUT_MS = 8_000;
 const MAX_SPECIES_ID_LENGTH = 128;
 
+/** Accepted search text after trimming and collapsing repeated spaces. */
+export const EXTERNAL_SPECIES_NAME_MAX_LENGTH = 80;
+
+/**
+ * Raw query text before normalisation. Larger than the normalised limit so
+ * surrounding whitespace still fits, and small enough to reject a huge query.
+ */
+export const EXTERNAL_SPECIES_NAME_RAW_MAX_LENGTH = 256;
+
+/** PostgREST `limit` for a name lookup. The full table is never requested. */
+export const EXTERNAL_SPECIES_LOOKUP_LIMIT = 10;
+
 /** Lowercase slug, e.g. `abelisaurus` or `tyrannosaurus-rex`. */
 const SPECIES_ID_PATTERN = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/;
 
@@ -42,12 +54,24 @@ const SPECIES_COLUMNS = [
 
 const MESSAGES = {
   invalidId: "Species identifier is invalid.",
+  invalidName: "Species name is invalid.",
   notConfigured: "The external species service is not configured.",
   unavailable: "The external species service is unavailable.",
   timedOut: "The external species request timed out.",
   invalidData: "The external species data is invalid.",
   mismatchedId: "The external species record did not match the requested identifier.",
 } as const;
+
+/**
+ * Letters, spaces, hyphens and apostrophes only.
+ * Excludes PostgREST reserved characters and LIKE wildcards.
+ */
+const SPECIES_NAME_PATTERN = /^[A-Za-z]+(?:[ '-][A-Za-z]+)*$/;
+
+/** Returned scientific names are reference text, not a second search query. */
+const MAX_RETURNED_SCIENTIFIC_NAME_LENGTH = 300;
+
+const NAME_LOOKUP_COLUMNS = ["id", "scientific_name"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -68,6 +92,50 @@ function parseExternalSpeciesId(value: unknown): AppResult<string> {
   }
 
   return ok(trimmed);
+}
+
+/**
+ * Normalises a species-name search.
+ * Trims ends, collapses repeated spaces, then applies length and character limits.
+ * Does not contact the external service.
+ */
+export function parseExternalSpeciesName(value: unknown): AppResult<string> {
+  if (typeof value !== "string") {
+    return err("validation", MESSAGES.invalidName);
+  }
+  if (value.length > EXTERNAL_SPECIES_NAME_RAW_MAX_LENGTH) {
+    return err("validation", MESSAGES.invalidName);
+  }
+
+  const normalised = value.trim().replace(/ {2,}/g, " ");
+  if (
+    normalised.length < 2 ||
+    normalised.length > EXTERNAL_SPECIES_NAME_MAX_LENGTH ||
+    !SPECIES_NAME_PATTERN.test(normalised)
+  ) {
+    return err("validation", MESSAGES.invalidName);
+  }
+
+  return ok(normalised);
+}
+
+/**
+ * Escapes a value embedded in a PostgREST `ilike` filter.
+ * `*` is PostgREST's wildcard; `%` and `_` are SQL LIKE wildcards.
+ * `, . : ( )` are reserved filter characters. The name parser already
+ * rejects these; escaping keeps a future pattern change from becoming injection.
+ */
+function escapePostgrestIlikeLiteral(value: string): string {
+  return value.replace(/[\\*,.:()%_]/g, (character) => `\\${character}`);
+}
+
+function isCanonicalSpeciesId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_SPECIES_ID_LENGTH &&
+    SPECIES_ID_PATTERN.test(value)
+  );
 }
 
 /**
@@ -268,4 +336,94 @@ export async function getExternalSpecies(
   }
 
   return parseExternalSpecies(payload.data[0], parsedId.data);
+}
+
+/** One external species identified during a name search. */
+export type ExternalSpeciesNameMatch = {
+  /** Canonical `public.species.id` as returned by the external API. */
+  id: string;
+  /** `scientific_name` as returned by the external API. */
+  scientific_name: string;
+};
+
+function parseSpeciesNameMatch(value: unknown): AppResult<ExternalSpeciesNameMatch> {
+  if (!isRecord(value) || !isCanonicalSpeciesId(value.id)) {
+    return err("validation", MESSAGES.invalidData);
+  }
+  if (
+    typeof value.scientific_name !== "string" ||
+    value.scientific_name.trim().length === 0 ||
+    value.scientific_name.length > MAX_RETURNED_SCIENTIFIC_NAME_LENGTH
+  ) {
+    return err("validation", MESSAGES.invalidData);
+  }
+
+  return ok({
+    id: value.id,
+    scientific_name: value.scientific_name,
+  });
+}
+
+function compareNameMatches(
+  left: ExternalSpeciesNameMatch,
+  right: ExternalSpeciesNameMatch,
+): number {
+  if (left.scientific_name < right.scientific_name) return -1;
+  if (left.scientific_name > right.scientific_name) return 1;
+  if (left.id < right.id) return -1;
+  if (left.id > right.id) return 1;
+  return 0;
+}
+
+/**
+ * Name lookup must not report an upstream failure as bad caller input
+ * or as a missing species. By-id retrieval keeps its own error contract.
+ */
+function upstreamLookupFailure(failure: AppError): AppResult<never> {
+  if (failure.code === "not_found") {
+    return err("unexpected", MESSAGES.unavailable);
+  }
+  if (failure.code === "validation") {
+    return err("unexpected", MESSAGES.invalidData);
+  }
+  return err(failure.code, failure.message);
+}
+
+/**
+ * Searches the external Species API by scientific name.
+ * Case-insensitive partial match via PostgREST `ilike`, bounded and ordered.
+ * Reads the same fixed-host configuration as {@link getExternalSpecies}.
+ * Does not write to either database and does not use Amber's session.
+ */
+export async function lookupExternalSpeciesByName(
+  speciesName: unknown,
+): Promise<AppResult<ExternalSpeciesNameMatch[]>> {
+  const parsedName = parseExternalSpeciesName(speciesName);
+  if (!parsedName.ok) return parsedName;
+
+  const config = readExternalSpeciesConfig();
+  if (!config.ok) return config;
+
+  const endpoint = new URL(config.data.endpoint);
+  const literal = escapePostgrestIlikeLiteral(parsedName.data);
+  endpoint.searchParams.set("scientific_name", `ilike.*${literal}*`);
+  endpoint.searchParams.set("select", NAME_LOOKUP_COLUMNS.join(","));
+  endpoint.searchParams.set("order", "scientific_name.asc,id.asc");
+  endpoint.searchParams.set("limit", String(EXTERNAL_SPECIES_LOOKUP_LIMIT));
+
+  const payload = await readSpeciesPayload(endpoint, config.data.apiKey);
+  if (!payload.ok) return upstreamLookupFailure(payload.error);
+  if (!Array.isArray(payload.data) || payload.data.length > EXTERNAL_SPECIES_LOOKUP_LIMIT) {
+    return err("unexpected", MESSAGES.invalidData);
+  }
+
+  const matches: ExternalSpeciesNameMatch[] = [];
+  for (const item of payload.data) {
+    const parsed = parseSpeciesNameMatch(item);
+    if (!parsed.ok) return upstreamLookupFailure(parsed.error);
+    matches.push(parsed.data);
+  }
+
+  matches.sort(compareNameMatches);
+  return ok(matches);
 }

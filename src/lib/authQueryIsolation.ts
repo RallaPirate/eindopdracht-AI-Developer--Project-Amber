@@ -22,7 +22,7 @@ import { isApplicationRole } from "@/types/database";
 const PERMISSION_RECHECK_MS = 60_000;
 const MAX_MISMATCH_RETRIES = 2;
 
-let requestSync: (() => Promise<AuthAccessSnapshot>) | null = null;
+let requestSync: (() => Promise<AuthAccessSnapshot | null>) | null = null;
 
 /**
  * Invalidates an in-flight identity sync so a slow verification cannot
@@ -33,8 +33,13 @@ export function cancelPendingAuthQuerySync() {
 }
 
 /** Runs a new verification if the browser isolation loop is active. */
-export function requestAuthQuerySync(): Promise<AuthAccessSnapshot> {
-  return requestSync?.() ?? Promise.resolve(getVerifiedAuthSnapshot());
+export async function requestAuthQuerySync(): Promise<AuthAccessSnapshot> {
+  return (await requestSync?.()) ?? getVerifiedAuthSnapshot();
+}
+
+/** Requires this check to complete with a fresh, active profile read. */
+export async function requestFreshAuthQuerySync(): Promise<AuthAccessSnapshot | null> {
+  return (await requestSync?.()) ?? null;
 }
 
 async function readPermissionScope(
@@ -106,20 +111,20 @@ export function startAuthQueryIsolation(): () => void {
   const verifyGeneration = async (
     generation: number,
     retries = 0,
-  ): Promise<AuthAccessSnapshot> => {
+  ): Promise<AuthAccessSnapshot | null> => {
       if (disposed || !isBrowserAuthCheckCurrent(generation)) {
-        return getVerifiedAuthSnapshot();
+        return null;
       }
       let verified: AuthCommit | undefined;
       try {
         const claims = await supabase.auth.getClaims();
         if (disposed || !isBrowserAuthCheckCurrent(generation)) {
-          return getVerifiedAuthSnapshot();
+          return null;
         }
 
         const session = await supabase.auth.getSession();
         if (disposed || !isBrowserAuthCheckCurrent(generation)) {
-          return getVerifiedAuthSnapshot();
+          return null;
         }
 
         const claimedUserId =
@@ -137,46 +142,49 @@ export function startAuthQueryIsolation(): () => void {
         );
       } catch {
         scheduleRetry(generation, retries);
-        return getVerifiedAuthSnapshot();
+        return null;
       }
-      if (!verified) return getVerifiedAuthSnapshot();
+      if (!verified) return null;
 
       if (disposed || !isBrowserAuthCheckCurrent(generation)) {
-        return getVerifiedAuthSnapshot();
+        return null;
       }
 
       if (verified.status === "stale") {
         commitBrowserVerifiedUser(generation, verified);
         scheduleRetry(generation, retries);
-        return getVerifiedAuthSnapshot();
+        return null;
       }
 
       if (verified.status === "ignored" || verified.status === "unavailable") {
-        return getVerifiedAuthSnapshot();
+        return null;
       }
 
       clearRetry();
       commitBrowserVerifiedUser(generation, verified);
       if (disposed || !isBrowserAuthCheckCurrent(generation)) {
-        return getVerifiedAuthSnapshot();
+        return null;
       }
 
       if (verified.status !== "authenticated") {
-        return getVerifiedAuthSnapshot();
+        return null;
       }
       const verifiedUserId = verified.userId;
       if (getVerifiedAuthUserId() !== verifiedUserId) {
-        return getVerifiedAuthSnapshot();
+        return null;
       }
 
       const permission = await readPermissionScope(supabase, verifiedUserId);
       if (disposed || !isBrowserAuthCheckCurrent(generation)) {
-        return getVerifiedAuthSnapshot();
+        return null;
       }
       if (getVerifiedAuthUserId() !== verifiedUserId) {
-        return getVerifiedAuthSnapshot();
+        return null;
       }
       applyBrowserPermissionRead(verifiedUserId, permission);
+      if (permission.status !== "active" || !isBrowserAuthCheckCurrent(generation)) {
+        return null;
+      }
       return getVerifiedAuthSnapshot();
   };
 
