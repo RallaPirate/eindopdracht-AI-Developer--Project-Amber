@@ -208,6 +208,40 @@ async function confirmMatch(act, id) {
   await waitFor(act, () => text(document.body).includes("Selected species"));
 }
 
+const rexMatch = {
+  external_species_id: "tyrannosaurus-rex",
+  scientific_name: "Tyrannosaurus rex",
+};
+
+function enrichmentProposal(load, match = rexMatch) {
+  const { assembleSpeciesEnrichmentProposal, SPECIES_ENRICHMENT_GENERATED_FIELDS } =
+    load("@/lib/ai/speciesEnrichmentSchemas");
+  const result = assembleSpeciesEnrichmentProposal({
+    source: {
+      id: match.external_species_id,
+      scientific_name: match.scientific_name,
+      diet_profile: "Carnivore",
+      geological_period: null,
+      region: null,
+      social_requirements: "",
+      general_care_recommendations: "",
+      hybrid: false,
+      franchise_origins: [],
+      franchise_appearances: [],
+    },
+    retrievedAt: "2026-11-05T12:00:00Z",
+    modelProposal: {
+      ...Object.fromEntries(SPECIES_ENRICHMENT_GENERATED_FIELDS.map((field) => [field, null])),
+      provenance: Object.fromEntries(SPECIES_ENRICHMENT_GENERATED_FIELDS.map((field) => [
+        field,
+        { basis: "api_interpretation", supporting_fields: [], uncertainty: "Limited data" },
+      ])),
+    },
+  });
+  assert.equal(result.ok, true);
+  return result.data;
+}
+
 async function runDom(speciesRows, fn, supabase) {
   const installed = installDom();
   const React = require("react");
@@ -248,12 +282,15 @@ async function runDom(speciesRows, fn, supabase) {
       QueryClientProvider,
     });
   } finally {
-    for (const resolve of fetches.splice(0)) {
-      resolve(jsonResponse({ ok: true, data: [] }));
-    }
     try {
       await act(async () => {
         root.unmount();
+      });
+      await act(async () => {
+        for (const resolve of fetches.splice(0)) {
+          resolve(jsonResponse({ ok: true, data: [] }));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
       });
     } finally {
       client.clear();
@@ -435,7 +472,11 @@ test("changing the search text drops earlier matches and confirmation", async ()
       data: [{ external_species_id: "stegosaurus", scientific_name: "Stegosaurus" }],
     });
     await confirmMatch(act, "stegosaurus");
-    await setInput(act, input, "Triceratops");
+    assert.equal(document.querySelector("input[name='species-name']"), null);
+    assert.match(text(document.body), /Selected species/);
+    await act(async () => { buttonByText("Search again").click(); });
+    await waitFor(act, () => document.querySelector("input[name='species-name']") !== null);
+    await setInput(act, document.querySelector("input[name='species-name']"), "Triceratops");
     assert.equal(text(document.body).includes("Selected species"), false);
     assert.equal(text(document.body).includes("stegosaurus"), false);
   });
@@ -550,6 +591,8 @@ test("switching management accounts does not keep the previous selection", async
       }],
     });
     await confirmMatch(act, "tyrannosaurus-rex");
+    await waitFor(act, () => calls.length === 2);
+    const resolvePreviousEnrichment = fetches.shift();
 
     await act(async () => {
       grant(qc, "user-mgmt-b", "management", "Bea");
@@ -570,6 +613,20 @@ test("switching management accounts does not keep the previous selection", async
       }],
     });
     await confirmMatch(act, "abelisaurus");
+    await waitFor(act, () => calls.length === 4);
+    await finishSearch(act, fetches, {
+      ok: true,
+      data: enrichmentProposal(load, {
+        external_species_id: "abelisaurus",
+        scientific_name: "Abelisaurus comahuesis",
+      }),
+    });
+    await waitFor(act, () => text(document.body).includes("TEMPORARY — NOT APPROVED OR SAVED"));
+    await act(async () => {
+      resolvePreviousEnrichment(jsonResponse({ ok: true, data: enrichmentProposal(load) }));
+    });
+    assert.match(text(document.body), /TEMPORARY — NOT APPROVED OR SAVED/);
+    assert.match(text(document.body), /Abelisaurus comahuesis/);
     assert.equal(text(document.body).includes("tyrannosaurus-rex"), false);
 
     await act(async () => {
@@ -579,6 +636,7 @@ test("switching management accounts does not keep the previous selection", async
     assert.equal(text(document.body).includes("Abelisaurus"), false);
     assert.equal(text(document.body).includes("tyrannosaurus-rex"), false);
     assert.equal(text(document.body).includes("Selected species"), false);
+    assert.doesNotMatch(text(document.body), /TEMPORARY — NOT APPROVED OR SAVED/);
   });
 });
 
@@ -785,5 +843,183 @@ test("the species browser keeps its search and selection across tabs", async () 
     assert.equal(restored.value, "Steg");
     assert.equal(text(document.querySelector("h2")), "Amber Stegosaurus");
     assert.equal(text(document.querySelector("[aria-current='true']")), "Amber Stegosaurus");
+  });
+});
+
+async function prepareEnrichment({ React, act, root, client, qc, load, calls, fetches, QueryClientProvider }) {
+  const app = load("./SpeciesDatabaseApp.tsx");
+  await act(async () => {
+    grant(qc, "user-mgmt", "management", "Ada");
+    root.render(renderApp(React, QueryClientProvider, client, app));
+  });
+  await openProposalTab(act);
+  await startSearch(act, calls, "Rex");
+  await finishSearch(act, fetches, { ok: true, data: [rexMatch] });
+  return chooseMatch(act, rexMatch.external_species_id);
+}
+
+test("confirmation generates once and malformed or mismatched proposals require an explicit retry", async () => {
+  await runDom([], async (h) => {
+    const { act, calls, fetches, load } = h;
+    const confirm = await prepareEnrichment(h);
+    assert.equal(calls.length, 1);
+    await act(async () => {
+      confirm.click();
+      confirm.click();
+    });
+    await waitFor(act, () => calls.length === 2);
+    assert.equal(text(document.querySelector("[role='status']")), "Generating species proposal…");
+    assert.deepEqual(structuredClone(calls[1]), {
+      url: "/api/agent/species-enrichment",
+      init: {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: '{"external_species_id":"tyrannosaurus-rex"}',
+      },
+    });
+
+    const proposal = enrichmentProposal(load);
+    for (const [body, status] of [
+      [{ ok: false, error: { code: "unauthorized", message: "provider detail" } }, 500],
+      [{ ok: true, data: { ...proposal, provenance: {} } }, 200],
+      [{
+        ok: true,
+        data: { ...proposal, api_facts: { ...proposal.api_facts, id: "abelisaurus" } },
+      }, 200],
+    ]) {
+      const before = calls.length;
+      await finishSearch(act, fetches, body, status);
+      await waitFor(act, () => buttonByText("Retry generation") !== null);
+      assert.equal(calls.length, before);
+      assert.match(text(document.querySelector("[role='alert']")), /Unable to generate/);
+      assert.doesNotMatch(text(document.body), /provider detail/);
+      const retry = buttonByText("Retry generation");
+      await act(async () => {
+        retry.click();
+        retry.click();
+      });
+      await waitFor(act, () => calls.length === before + 1);
+      assert.equal(calls.at(-1).init.body, calls[1].init.body);
+    }
+
+    await finishSearch(act, fetches, { ok: true, data: proposal });
+    await waitFor(act, () => text(document.body).includes("TEMPORARY — NOT APPROVED OR SAVED"));
+    assert.equal(buttonByText("Retry generation"), null);
+    assert.equal(buttonByText("Confirm species"), null);
+    assert.equal(calls.length, 5);
+  });
+});
+
+test("search again discards an in-flight proposal and suppresses duplicate generation", async () => {
+  await runDom([], async (h) => {
+    const { act, calls, fetches, load } = h;
+    const confirm = await prepareEnrichment(h);
+    await act(async () => { confirm.click(); });
+    await waitFor(act, () => calls.length === 2);
+    await act(async () => { buttonByText("Search again").click(); });
+    await startSearch(act, calls, "Rex");
+    const resolveEnrichment = fetches.shift();
+    await finishSearch(act, fetches, { ok: true, data: [rexMatch] });
+    await waitFor(act, () => document.querySelector("input[type='radio']") !== null);
+    await act(async () => { document.querySelector("input[type='radio']").click(); });
+    assert.equal(buttonByText("Confirm species").disabled, true);
+    await act(async () => {
+      resolveEnrichment(jsonResponse({ ok: true, data: enrichmentProposal(load) }));
+    });
+    await waitFor(act, () => !buttonByText("Confirm species").disabled);
+    assert.equal(calls.length, 3);
+    assert.doesNotMatch(text(document.body), /Selected species|TEMPORARY — NOT APPROVED OR SAVED/);
+  });
+});
+
+test("an enrichment access denial clears selection and triggers auth sync", async () => {
+  await runDom([], async (h) => {
+    const { act, calls, fetches, load } = h;
+    const auth = load("@/lib/authQueryIsolation");
+    let syncs = 0;
+    auth.requestAuthQuerySync = async () => { syncs += 1; };
+    const confirm = await prepareEnrichment(h);
+    await act(async () => { confirm.click(); });
+    await waitFor(act, () => calls.length === 2);
+    await finishSearch(act, fetches, { ok: false, error: { message: "provider detail" } }, 403);
+    await waitFor(act, () => document.querySelector("[role='alert']") !== null);
+    assert.match(text(document.querySelector("[role='alert']")), /You do not have permission/);
+    assert.doesNotMatch(text(document.body), /provider detail|Selected species|tyrannosaurus-rex/);
+    assert.equal(buttonByText("Retry generation"), null);
+    assert.equal(syncs, 1);
+  });
+});
+
+test("generation success is discarded if the fresh Management recheck finds a downgrade", async () => {
+  await runDom([], async (h) => {
+    const { act, calls, fetches, load, qc } = h;
+    const confirm = await prepareEnrichment(h);
+    await act(async () => { confirm.click(); });
+    await waitFor(act, () => calls.length === 2);
+    const auth = load("@/lib/authQueryIsolation");
+    auth.requestFreshAuthQuerySync = async () => {
+      qc.applyBrowserPermissionRead("user-mgmt", {
+        status: "active", role: "employee", displayName: "Ada",
+      });
+      return qc.getVerifiedAuthSnapshot();
+    };
+    await finishSearch(act, fetches, { ok: true, data: enrichmentProposal(load) });
+    await waitFor(act, () => buttonByText("New Species Proposal") === null);
+    assert.doesNotMatch(text(document.body), /Selected species|TEMPORARY — NOT APPROVED OR SAVED/);
+    await act(async () => {
+      grant(qc, "user-mgmt", "management", "Ada");
+    });
+    auth.requestFreshAuthQuerySync = async () => qc.getVerifiedAuthSnapshot();
+    await openProposalTab(act);
+    assert.doesNotMatch(text(document.body), /Selected species|TEMPORARY — NOT APPROVED OR SAVED/);
+  });
+});
+
+test("the proposal tab shows lookup, generation, and review as separate stages", async () => {
+  await runDom([], async (h) => {
+    const { act, calls, fetches, load } = h;
+    const confirm = await prepareEnrichment(h);
+    const body = () => text(document.body);
+    assert.ok(document.querySelector("input[name='species-name']"));
+    assert.match(body(), /Which dinosaur would you like to add\?/);
+    assert.doesNotMatch(body(), /Generating species proposal|TEMPORARY — NOT APPROVED OR SAVED/);
+
+    await act(async () => { confirm.click(); });
+    await waitFor(act, () => body().includes("Generating species proposal"));
+    assert.equal(document.querySelector("input[name='species-name']"), null);
+    assert.doesNotMatch(body(), /Which dinosaur would you like to add\?/);
+    assert.match(body(), /Selected species/);
+    assert.match(body(), /Tyrannosaurus rex/);
+    assert.match(body(), /tyrannosaurus-rex/);
+    assert.ok(buttonByText("Search again"));
+    assert.doesNotMatch(body(), /TEMPORARY — NOT APPROVED OR SAVED/);
+
+    await finishSearch(act, fetches, { ok: true, data: enrichmentProposal(load) });
+    await waitFor(act, () => body().includes("TEMPORARY — NOT APPROVED OR SAVED"));
+    assert.equal((body().match(/TEMPORARY — NOT APPROVED OR SAVED/g) ?? []).length, 1);
+    assert.equal(document.querySelector("input[name='species-name']"), null);
+    assert.doesNotMatch(body(), /Which dinosaur would you like to add\?|Selected species/);
+    assert.match(body(), /Untrusted external data/);
+    assert.match(body(), /Agent proposal/);
+    for (const label of [
+      "General description",
+      "Diet preferences",
+      "Habitat preferences",
+      "Handling guidance",
+      "Minimum handlers",
+      "Safety class",
+    ]) {
+      assert.ok(body().includes(label), label);
+    }
+    assert.match(body(), /Retrieved\s+2026-11-05T12:00:00Z/);
+    assert.ok(buttonByText("Search again"));
+    assert.equal(calls.length, 2);
+
+    await act(async () => { buttonByText("Search again").click(); });
+    await waitFor(act, () => document.querySelector("input[name='species-name']") !== null);
+    assert.match(body(), /Which dinosaur would you like to add\?/);
+    assert.doesNotMatch(body(), /TEMPORARY — NOT APPROVED OR SAVED|Generating species proposal/);
   });
 });

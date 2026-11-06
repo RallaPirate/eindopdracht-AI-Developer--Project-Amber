@@ -19,8 +19,9 @@ function deferred() {
 // mocked. The DOM regressions below opt into real React and application UI.
 function harness(t, initialUser = null, { realReact = false, components = {} } = {}) {
   let user = initialUser, authCallback, timerId = 0, activeRenderer;
+  let accessToken = initialUser ? `token-${initialUser}` : null;
   const timers = new Map(), modules = new Map();
-  const claims = [], profiles = [];
+  const claims = [], sessions = [], profiles = [];
   const calls = { claims: 0, signOut: 0, login: 0, registration: 0 };
   const profile = (role = "employee") => ({
     data: { role, display_name: `Profile ${user}` }, error: null,
@@ -28,9 +29,10 @@ function harness(t, initialUser = null, { realReact = false, components = {} } =
   const claimsResult = (id = user) => ({
     data: id ? { claims: { sub: id } } : null, error: null,
   });
-  function emit(event, id = user) {
+  function emit(event, id = user, token) {
+    if (id !== user || token !== undefined) accessToken = token ?? (id ? `token-${id}` : null);
     user = id;
-    authCallback(event, id ? { user: { id } } : null);
+    authCallback(event, id ? { user: { id }, access_token: token } : null);
   }
   async function authenticate(credentials, flow) {
     calls[flow]++;
@@ -41,7 +43,9 @@ function harness(t, initialUser = null, { realReact = false, components = {} } =
   const supabase = {
     auth: {
       getClaims() { calls.claims++; return claims.shift() ?? Promise.resolve(claimsResult()); },
-      getSession: async () => ({ data: { session: user ? { user: { id: user } } : null }, error: null }),
+      getSession: async () => sessions.shift() ?? {
+        data: { session: user ? { user: { id: user }, access_token: accessToken } : null }, error: null,
+      },
       onAuthStateChange(callback) {
         authCallback = callback;
         return { data: { subscription: { unsubscribe() {} } } };
@@ -203,7 +207,7 @@ function harness(t, initialUser = null, { realReact = false, components = {} } =
     documentListeners.get("visibilitychange")?.();
   }
   const dispatchBrowser = (event, value) => browserListeners.get(event)?.(value);
-  return { auth, qc, shell, Shell, load, renderer, emit, fire, visibility, dispatchBrowser, timers, claims, profiles, calls, profile, claimsResult, seed };
+  return { auth, qc, shell, Shell, load, renderer, emit, fire, visibility, dispatchBrowser, timers, claims, sessions, profiles, calls, profile, claimsResult, seed };
 }
 
 function find(view, predicate) {
@@ -343,7 +347,7 @@ test("React DOM: repeated same-user tab recovery preserves windows, focus and un
   for (let i = 0; i < 3; i++) {
     const epoch = h.qc.getVerifiedAuthSnapshot().accessEpoch;
     await h.act(() => { h.visibility("hidden"); h.visibility("visible"); });
-    // The SDK's recovery SIGNED_IN is distinct from Amber's visibility check.
+    // A SIGNED_IN event without a token still takes the strict path.
     await h.act(() => {
       h.emit("SIGNED_IN");
       // Events arriving before React commits concealment must also be blocked.
@@ -446,7 +450,7 @@ test("boot follows replacement verification after the pending claims check is su
   const h = harness(t, "user-a"); await flush();
   h.shell.render().props.onContinue();
   const pending = deferred(); h.claims.push(pending.promise);
-  h.shell.render();
+  h.shell.render(); await flush();
   h.emit("TOKEN_REFRESHED");
   pending.resolve(h.claimsResult()); await flush();
   h.shell.render().props.onComplete();
@@ -459,7 +463,7 @@ test("boot waits through an intermediate unverified result and resumes when the 
   const h = harness(t); await flush();
   h.shell.render().props.onContinue();
   const pending = deferred(); h.claims.push(pending.promise);
-  h.shell.render();
+  h.shell.render(); await flush();
   h.emit("SIGNED_IN", "user-a");
   pending.resolve(h.claimsResult(null)); await flush();
   h.shell.render().props.onComplete();
@@ -481,6 +485,95 @@ test("same-user token refresh retains epoch, query data and the rendered desktop
   assert.ok(named(h.shell.render(), "Desktop"));
   assert.equal(named(h.shell.render(), "LoginDialog"), null);
   assert.deepEqual(h.qc.getQueryClient().getQueryData(key), ["private-row"]);
+});
+
+test("visibility recovery of the verified Management token keeps the epoch and cache", async (t) => {
+  const h = harness(t, "user-a");
+  h.profiles.push(Promise.resolve(h.profile("management")));
+  await flush();
+  const before = h.qc.getVerifiedAuthSnapshot(), key = h.seed();
+  const claimsBefore = h.calls.claims;
+  const profileRead = deferred();
+  h.profiles.push(profileRead.promise);
+
+  h.visibility("hidden");
+  h.visibility("visible");
+  h.emit("SIGNED_IN", "user-a", "token-user-a");
+  assert.equal(h.qc.getVerifiedAuthSnapshot(), before);
+  h.fire(0);
+  await flush();
+  assert.equal(h.calls.claims, claimsBefore + 1);
+  assert.equal(h.qc.getVerifiedAuthSnapshot(), before);
+
+  profileRead.resolve(h.profile("management"));
+  await flush();
+  assert.equal(h.qc.getVerifiedAuthSnapshot(), before);
+  assert.deepEqual(h.qc.getQueryClient().getQueryData(key), ["private-row"]);
+});
+
+for (const [label, userId, token] of [
+  ["a new session for the same account", "user-a", "new-token-user-a"],
+  ["a different account", "user-b", "token-user-b"],
+  ["an event without a token", "user-a", undefined],
+]) {
+  test(`SIGNED_IN for ${label} immediately invalidates old access`, async (t) => {
+    const h = harness(t, "user-a"); await flush();
+    const before = h.qc.getVerifiedAuthSnapshot(), key = h.seed();
+    h.emit("SIGNED_IN", userId, token);
+    assert.equal(h.qc.getVerifiedAuthSnapshot().status, "unverified");
+    assert.ok(h.qc.getVerifiedAuthSnapshot().accessEpoch > before.accessEpoch);
+    assert.equal(h.qc.getQueryClient().getQueryData(key), undefined);
+    h.fire(0); await flush();
+    assert.equal(h.qc.getVerifiedAuthSnapshot().userId, userId);
+  });
+}
+
+for (const [label, read, status] of [
+  ["a downgrade", (h) => h.profile("employee"), "ready"],
+  ["revocation", () => ({ data: null, error: null }), "revoked"],
+  ["an unavailable profile", () => ({ data: null, error: {} }), "suspended"],
+]) {
+  test(`matching-token recovery invalidates Management access after ${label}`, async (t) => {
+    const h = harness(t, "user-a");
+    h.profiles.push(Promise.resolve(h.profile("management")));
+    await flush();
+    const before = h.qc.getVerifiedAuthSnapshot(), key = h.seed();
+    h.profiles.push(Promise.resolve(read(h)));
+    h.emit("SIGNED_IN", "user-a", "token-user-a");
+    h.fire(0); await flush();
+    const after = h.qc.getVerifiedAuthSnapshot();
+    assert.equal(after.status, status);
+    assert.notEqual(after.role, "management");
+    assert.ok(after.accessEpoch > before.accessEpoch);
+    assert.equal(h.qc.getQueryClient().getQueryData(key), undefined);
+  });
+}
+
+test("a superseding visibility check still invalidates recovery if claims are unavailable", async (t) => {
+  const h = harness(t, "user-a"); await flush();
+  const before = h.qc.getVerifiedAuthSnapshot(), key = h.seed();
+  h.emit("SIGNED_IN", "user-a", "token-user-a");
+  h.claims.push(Promise.resolve({ data: null, error: { name: "AuthRetryableFetchError" } }));
+  h.visibility("hidden");
+  h.visibility("visible");
+  h.fire(0); await flush();
+  assert.equal(h.qc.getVerifiedAuthSnapshot().status, "unverified");
+  assert.ok(h.qc.getVerifiedAuthSnapshot().accessEpoch > before.accessEpoch);
+  assert.equal(h.qc.getQueryClient().getQueryData(key), undefined);
+});
+
+test("matching-token recovery invalidates access if the active token changes during verification", async (t) => {
+  const h = harness(t, "user-a"); await flush();
+  const before = h.qc.getVerifiedAuthSnapshot(), key = h.seed();
+  h.emit("SIGNED_IN", "user-a", "token-user-a");
+  h.sessions.push(
+    { data: { session: { user: { id: "user-a" }, access_token: "token-user-a" } }, error: null },
+    { data: { session: { user: { id: "user-a" }, access_token: "new-token-user-a" } }, error: null },
+  );
+  h.fire(0); await flush();
+  assert.equal(h.qc.getVerifiedAuthSnapshot().status, "unverified");
+  assert.ok(h.qc.getVerifiedAuthSnapshot().accessEpoch > before.accessEpoch);
+  assert.equal(h.qc.getQueryClient().getQueryData(key), undefined);
 });
 
 for (const reason of ["unexpected sign-out", "session expiry"]) {
@@ -527,7 +620,7 @@ test("refresh with a changed identity or revoked profile still blocks access and
 test("an obsolete rejection cannot schedule a retry over a newer pending profile read", async (t) => {
   const h = harness(t, "user-a"); await flush();
   const old = deferred(); h.claims.push(old.promise);
-  const obsolete = h.auth.requestAuthQuerySync();
+  const obsolete = h.auth.requestAuthQuerySync(); await flush();
   const profile = deferred(); h.profiles.push(profile.promise);
   const current = h.auth.requestAuthQuerySync(); await flush();
   old.reject(new Error("obsolete network failure")); await obsolete;

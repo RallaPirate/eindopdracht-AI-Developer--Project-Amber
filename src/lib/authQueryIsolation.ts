@@ -90,6 +90,16 @@ export function startAuthQueryIsolation(): () => void {
 
   let disposed = false;
   let retryTimer: number | undefined;
+  let verifiedSession: { token: string; userId: string; epoch: number } | null = null;
+  // A visibility or explicit check can supersede the event's scheduled check.
+  // The latest generation must still finish revalidating the recovery.
+  let recoveryPending = false;
+
+  const beginStrictAuthEvent = (event: string, userId: string | null) => {
+    verifiedSession = null;
+    recoveryPending = false;
+    return beginBrowserAuthEvent(event, userId);
+  };
 
   const clearRetry = () => {
     if (retryTimer === undefined) return;
@@ -115,9 +125,21 @@ export function startAuthQueryIsolation(): () => void {
       if (disposed || !isBrowserAuthCheckCurrent(generation)) {
         return null;
       }
+    const recovery = recoveryPending ? verifiedSession : null;
       let verified: AuthCommit | undefined;
+    let token: string | undefined;
+    let sessionToken: string | undefined;
       try {
-        const claims = await supabase.auth.getClaims();
+        const initialSession = await supabase.auth.getSession();
+        if (disposed || !isBrowserAuthCheckCurrent(generation)) {
+          return null;
+        }
+        token = initialSession.data.session?.access_token;
+        // Bind the claims check to the exact token, then ensure the active
+        // session still uses it before recording or revalidating that token.
+        const claims = initialSession.error
+          ? { data: null, error: initialSession.error }
+          : await supabase.auth.getClaims(token);
         if (disposed || !isBrowserAuthCheckCurrent(generation)) {
           return null;
         }
@@ -127,6 +149,7 @@ export function startAuthQueryIsolation(): () => void {
           return null;
         }
 
+        sessionToken = session.data.session?.access_token;
         const claimedUserId =
           !claims.error &&
           typeof claims.data?.claims?.sub === "string" &&
@@ -141,6 +164,8 @@ export function startAuthQueryIsolation(): () => void {
           session.data.session?.user?.id ?? null,
         );
       } catch {
+        if (disposed || !isBrowserAuthCheckCurrent(generation)) return null;
+        if (recovery) generation = beginStrictAuthEvent("SIGNED_IN", recovery.userId);
         scheduleRetry(generation, retries);
         return null;
       }
@@ -148,6 +173,18 @@ export function startAuthQueryIsolation(): () => void {
 
       if (disposed || !isBrowserAuthCheckCurrent(generation)) {
         return null;
+      }
+      if (recovery && (
+        verified.status !== "authenticated" ||
+        verified.userId !== recovery.userId ||
+        token !== recovery.token ||
+        sessionToken !== recovery.token
+      )) {
+        generation = beginStrictAuthEvent("SIGNED_IN", recovery.userId);
+        if (verified.status === "authenticated") {
+          scheduleRetry(generation, retries);
+          return null;
+        }
       }
 
       if (verified.status === "stale") {
@@ -183,9 +220,18 @@ export function startAuthQueryIsolation(): () => void {
       }
       applyBrowserPermissionRead(verifiedUserId, permission);
       if (permission.status !== "active" || !isBrowserAuthCheckCurrent(generation)) {
+        if (isBrowserAuthCheckCurrent(generation)) {
+          verifiedSession = null;
+          recoveryPending = false;
+        }
         return null;
       }
-      return getVerifiedAuthSnapshot();
+      const access = getVerifiedAuthSnapshot();
+      verifiedSession = token && token === sessionToken && access.status === "ready"
+        ? { token, userId: verifiedUserId, epoch: access.accessEpoch }
+        : null;
+      recoveryPending = false;
+      return access;
   };
 
   const sync = () => {
@@ -195,12 +241,20 @@ export function startAuthQueryIsolation(): () => void {
 
   const { data } = supabase.auth.onAuthStateChange((event, session) => {
     if (disposed) return;
-    // Drop the previous cache binding before any awaited claims check.
     // The callback must not itself call getClaims or getSession.
-    const generation = beginBrowserAuthEvent(
-      event,
-      session?.user?.id ?? null,
-    );
+    const access = getVerifiedAuthSnapshot();
+    const userId = session?.user?.id ?? null;
+    const repeatedSignIn = event === "SIGNED_IN" &&
+      verifiedSession !== null &&
+      session?.access_token === verifiedSession.token &&
+      access.status === "ready" &&
+      userId === access.userId && userId === verifiedSession.userId &&
+      access.accessEpoch === verifiedSession.epoch;
+    const strictEvent = recoveryPending && event === "TOKEN_REFRESHED" ? "SIGNED_IN" : event;
+    const generation = repeatedSignIn
+      ? beginBrowserAuthCheck()
+      : beginStrictAuthEvent(strictEvent, userId);
+    recoveryPending = repeatedSignIn;
     clearRetry();
     window.setTimeout(() => {
       if (!disposed) void verifyGeneration(generation);
