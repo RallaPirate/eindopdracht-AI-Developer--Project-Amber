@@ -112,6 +112,7 @@ function localSpecies(id, displayName) {
     handling_guidance: "Keep clear.",
     minimum_handlers: 2,
     safety_class: "low",
+    updated_at: "2026-03-15T14:30:45.000000Z",
   };
 }
 

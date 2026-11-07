@@ -10,8 +10,8 @@ import {
 /** Scope passed to `useAuthenticatedQuery`. The hook adds the verified user id. */
 export const SPECIES_DATABASE_QUERY_KEY = ["species-database", "list"] as const;
 
-const SPECIES_LIST_COLUMNS =
-  "id, display_name, general_description, diet_preferences, habitat_preferences, handling_guidance, minimum_handlers, safety_class";
+export const SPECIES_LIST_COLUMNS =
+  "id, display_name, general_description, diet_preferences, habitat_preferences, handling_guidance, minimum_handlers, safety_class, updated_at";
 
 /** PostgREST returns at most this many rows unless the caller pages. */
 export const SPECIES_LIST_PAGE_SIZE = 1000;
@@ -20,8 +20,14 @@ export const SAFETY_CLASSES = ["low", "moderate", "high", "critical"] as const;
 
 export type SafetyClass = (typeof SAFETY_CLASSES)[number];
 
-export type LocalSpecies = {
-  id: string;
+/** PostgreSQL `smallint` upper bound. The column also requires a value > 0. */
+const POSTGRES_SMALLINT_MAX = 32_767;
+
+/**
+ * Fields a Senior or Management user may submit for an existing species.
+ * Identity and audit columns are not part of this payload.
+ */
+export type SpeciesEditableFields = {
   display_name: string;
   general_description: string;
   diet_preferences: string;
@@ -30,6 +36,19 @@ export type LocalSpecies = {
   minimum_handlers: number;
   safety_class: SafetyClass;
 };
+
+export type LocalSpecies = SpeciesEditableFields & {
+  id: string;
+  /** Database-maintained `timestamptz`, kept as the original response string. */
+  updated_at: string;
+};
+
+/**
+ * ISO-8601 timestamp with a `T` separator, optional fractional seconds and a
+ * `Z` or `±HH:MM` offset. The matched text is kept verbatim.
+ */
+const TIMESTAMPTZ_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(?:Z|([+-]\d{2}):(\d{2}))$/;
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -64,17 +83,60 @@ function storedSafetyClass(value: unknown): AppResult<SafetyClass> {
 }
 
 function storedHandlerCount(value: unknown): AppResult<number> {
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > POSTGRES_SMALLINT_MAX
+  ) {
     return err("validation");
   }
   return ok(value);
 }
 
-function parseSpeciesRow(value: unknown): AppResult<LocalSpecies> {
-  if (!isRecord(value)) return err("validation");
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
 
-  const id = storedId(value.id);
-  if (!id.ok) return id;
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
+/**
+ * Accepts a database `timestamptz` string and returns that same string.
+ * Validity is checked from the text so fractional seconds are not truncated.
+ */
+function storedTimestamp(value: unknown): AppResult<string> {
+  if (typeof value !== "string") return err("validation");
+  const match = TIMESTAMPTZ_PATTERN.exec(value);
+  if (!match) return err("validation");
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[8] === undefined ? undefined : Number(match[8].slice(1));
+  const offsetMinute = match[9] === undefined ? undefined : Number(match[9]);
+
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) {
+    return err("validation");
+  }
+  if (hour > 23 || minute > 59 || second > 59) return err("validation");
+  if (
+    offsetHour !== undefined &&
+    (offsetHour > 23 || offsetMinute === undefined || offsetMinute > 59)
+  ) {
+    return err("validation");
+  }
+  return ok(value);
+}
+
+function parseEditableFields(
+  value: Record<string, unknown>,
+): AppResult<SpeciesEditableFields> {
   const displayName = storedText(value.display_name);
   if (!displayName.ok) return displayName;
   const generalDescription = storedText(value.general_description);
@@ -91,7 +153,6 @@ function parseSpeciesRow(value: unknown): AppResult<LocalSpecies> {
   if (!safetyClass.ok) return safetyClass;
 
   return ok({
-    id: id.data,
     display_name: displayName.data,
     general_description: generalDescription.data,
     diet_preferences: dietPreferences.data,
@@ -99,6 +160,49 @@ function parseSpeciesRow(value: unknown): AppResult<LocalSpecies> {
     handling_guidance: handlingGuidance.data,
     minimum_handlers: minimumHandlers.data,
     safety_class: safetyClass.data,
+  });
+}
+
+/**
+ * Validates an edit payload. Missing fields fail; none are filled in here.
+ * Accepted text is returned unchanged, including surrounding whitespace.
+ */
+export function parseSpeciesEditableFields(
+  value: unknown,
+): AppResult<SpeciesEditableFields> {
+  if (!isRecord(value)) return err("validation");
+  return parseEditableFields(value);
+}
+
+/**
+ * Identity and the original concurrency token for an update.
+ * `updated_at` is returned unchanged so a later write can match that exact value.
+ */
+export function parseSpeciesConcurrencyKey(
+  value: unknown,
+): AppResult<Pick<LocalSpecies, "id" | "updated_at">> {
+  if (!isRecord(value)) return err("validation");
+  const id = storedId(value.id);
+  if (!id.ok) return id;
+  const updatedAt = storedTimestamp(value.updated_at);
+  if (!updatedAt.ok) return updatedAt;
+  return ok({ id: id.data, updated_at: updatedAt.data });
+}
+
+function parseSpeciesRow(value: unknown): AppResult<LocalSpecies> {
+  if (!isRecord(value)) return err("validation");
+
+  const id = storedId(value.id);
+  if (!id.ok) return id;
+  const updatedAt = storedTimestamp(value.updated_at);
+  if (!updatedAt.ok) return updatedAt;
+  const fields = parseEditableFields(value);
+  if (!fields.ok) return fields;
+
+  return ok({
+    id: id.data,
+    ...fields.data,
+    updated_at: updatedAt.data,
   });
 }
 

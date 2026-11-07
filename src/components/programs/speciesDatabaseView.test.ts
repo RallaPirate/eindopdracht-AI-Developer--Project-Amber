@@ -6,6 +6,7 @@ import { authenticatedQueryKey } from "../../lib/queryCacheIsolation.ts";
 import {
   fetchLocalSpecies,
   filterSpeciesByName,
+  parseSpeciesEditableFields,
   parseSpeciesList,
   resolveSelectedSpeciesId,
   sortLocalSpecies,
@@ -21,6 +22,16 @@ const ID = {
   bramble: "00000000-0000-4000-8000-000000000004",
 } as const;
 
+const UPDATED_AT = "2026-03-15T14:30:45.123456+00:00";
+
+const VALIDATION_FAILURE = {
+  ok: false as const,
+  error: {
+    code: "validation" as const,
+    message: SAFE_ERROR_MESSAGES.validation,
+  },
+};
+
 function row(
   id: string,
   displayName: string,
@@ -35,6 +46,7 @@ function row(
     handling_guidance: `${displayName} handling`,
     minimum_handlers: 2,
     safety_class: "moderate",
+    updated_at: UPDATED_AT,
     ...overrides,
   };
 }
@@ -77,6 +89,102 @@ test("names sort alphabetically without regard to case, then by id", () => {
     sortLocalSpecies(species).map((entry) => entry.id),
     species.map((entry) => entry.id),
   );
+});
+
+test("updated_at is kept as the original timestamp string", () => {
+  const precise = "2026-03-15T14:30:45.123456+00:00";
+  const offset = "2024-02-29T08:05:06+01:30";
+  const zulu = "2026-11-07T16:28:00.123456Z";
+  const [microseconds] = parsed([row(ID.amber, "amber", { updated_at: precise })]);
+  const [wholeSeconds] = parsed([row(ID.cedar, "Cedar", { updated_at: offset })]);
+  const [utc] = parsed([row(ID.bramble, "bramble", { updated_at: zulu })]);
+
+  assert.equal(microseconds.updated_at, precise);
+  assert.notEqual(microseconds.updated_at, new Date(precise).toISOString());
+  assert.equal(wholeSeconds.updated_at, offset);
+  assert.equal(utc.updated_at, zulu);
+});
+
+test("a species row without a valid updated_at is rejected", () => {
+  const { updated_at: _omitted, ...missingTimestamp } = row(ID.amber, "amber");
+  for (const payload of [
+    [missingTimestamp],
+    [row(ID.amber, "amber", { updated_at: null })],
+    [row(ID.amber, "amber", { updated_at: "" })],
+    [row(ID.amber, "amber", { updated_at: "2026-03-15" })],
+    [row(ID.amber, "amber", { updated_at: "2026-03-15T14:30:45" })],
+    [row(ID.amber, "amber", { updated_at: "2026-03-15T14:30:45.123456" })],
+    [row(ID.amber, "amber", { updated_at: "2026-02-31T00:00:00Z" })],
+    [row(ID.amber, "amber", { updated_at: "2026-03-15T24:00:00Z" })],
+    [row(ID.amber, "amber", { updated_at: "2026-03-15 14:30:45Z" })],
+    [row(ID.amber, "amber", { updated_at: 1_710_000_000_000 })],
+  ]) {
+    assert.deepEqual(parseSpeciesList(payload), VALIDATION_FAILURE);
+  }
+});
+
+const EDITABLE_FIELDS = {
+  display_name: "  Amber Lynx  ",
+  general_description: "  Lives in the reed beds.  ",
+  diet_preferences: "Fish and shorebirds",
+  habitat_preferences: "Reed beds",
+  handling_guidance: "Keep two handlers on the near side.",
+  minimum_handlers: 2,
+  safety_class: "high",
+} as const;
+
+test("editable species fields keep authored text and permitted operational values", () => {
+  const atMinimum = { ...EDITABLE_FIELDS, minimum_handlers: 1, safety_class: "low" };
+  const atMaximum = {
+    ...EDITABLE_FIELDS,
+    minimum_handlers: 32_767,
+    safety_class: "critical",
+  };
+
+  assert.deepEqual(parseSpeciesEditableFields(EDITABLE_FIELDS), {
+    ok: true,
+    data: EDITABLE_FIELDS,
+  });
+  assert.deepEqual(parseSpeciesEditableFields(atMinimum), { ok: true, data: atMinimum });
+  assert.deepEqual(
+    parseSpeciesEditableFields({
+      ...atMaximum,
+      id: ID.amber,
+      updated_at: UPDATED_AT,
+      external_species_id: "amber-lynx",
+    }),
+    { ok: true, data: atMaximum },
+  );
+});
+
+test("editable species fields reject empty text, invalid counts and safety classes", () => {
+  const { display_name: _name, ...withoutName } = EDITABLE_FIELDS;
+  const { minimum_handlers: _count, ...withoutCount } = EDITABLE_FIELDS;
+  const { safety_class: _safety, ...withoutSafety } = EDITABLE_FIELDS;
+
+  for (const payload of [
+    null,
+    [],
+    withoutName,
+    withoutCount,
+    withoutSafety,
+    { ...EDITABLE_FIELDS, display_name: "" },
+    { ...EDITABLE_FIELDS, display_name: "   " },
+    { ...EDITABLE_FIELDS, general_description: " \t " },
+    { ...EDITABLE_FIELDS, diet_preferences: "" },
+    { ...EDITABLE_FIELDS, habitat_preferences: "  " },
+    { ...EDITABLE_FIELDS, handling_guidance: "" },
+    { ...EDITABLE_FIELDS, minimum_handlers: 0 },
+    { ...EDITABLE_FIELDS, minimum_handlers: -1 },
+    { ...EDITABLE_FIELDS, minimum_handlers: 1.5 },
+    { ...EDITABLE_FIELDS, minimum_handlers: 32_768 },
+    { ...EDITABLE_FIELDS, minimum_handlers: "2" },
+    { ...EDITABLE_FIELDS, safety_class: "Low" },
+    { ...EDITABLE_FIELDS, safety_class: "severe" },
+    { ...EDITABLE_FIELDS, safety_class: "" },
+  ]) {
+    assert.deepEqual(parseSpeciesEditableFields(payload), VALIDATION_FAILURE);
+  }
 });
 
 test("stored text is kept verbatim", () => {
@@ -139,6 +247,7 @@ test("an empty payload is an empty list, and invalid payloads are failures", () 
     [row(ID.amber, "amber"), row(ID.cedar, "Cedar", { safety_class: "Low" })],
     [row(ID.amber, "amber", { minimum_handlers: 0 })],
     [row(ID.amber, "amber", { minimum_handlers: "2" })],
+    [row(ID.amber, "amber", { minimum_handlers: 32_768 })],
     [row(ID.amber, "amber", { general_description: "   " })],
     [row(ID.amber, "   ")],
   ]) {
@@ -149,7 +258,7 @@ test("an empty payload is an empty list, and invalid payloads are failures", () 
 });
 
 const SPECIES_COLUMNS =
-  "id, display_name, general_description, diet_preferences, habitat_preferences, handling_guidance, minimum_handlers, safety_class";
+  "id, display_name, general_description, diet_preferences, habitat_preferences, handling_guidance, minimum_handlers, safety_class, updated_at";
 
 type SpeciesPage = {
   data: unknown;

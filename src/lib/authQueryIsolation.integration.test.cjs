@@ -959,9 +959,16 @@ test("current-epoch callback capabilities update scoped cache data and invalidat
   assert.deepEqual(h.qc.getQueryClient().getQueryData(key), ["confirmed"]);
   assert.equal(h.qc.getQueryClient().getQueryState(key).isInvalidated, true);
   assert.equal(execution.client, undefined);
+  assert.deepEqual(execution.cache.getQueryData(["private"]), ["confirmed"]);
   let updaterRan = false;
   assert.throws(() => execution.cache.setQueryData(["private"], () => { updaterRan = true; }), { name: "TypeError" });
   assert.equal(updaterRan, false);
   execution.cache.setQueryData(["missing"], ["must refetch instead"]);
   assert.equal(h.qc.getQueryClient().getQueryData(["auth-user", "user-a", "missing"]), undefined);
+  assert.equal(execution.cache.getQueryData(["missing"]), undefined);
+  h.qc.clearBrowserQueryCache();
+  h.seed();
+  assert.equal(execution.cache.getQueryData(["private"]), undefined);
+  execution.cache.setQueryData(["private"], ["stale saved row"]);
+  assert.notDeepEqual(h.qc.getQueryClient().getQueryData(key), ["stale saved row"]);
 });

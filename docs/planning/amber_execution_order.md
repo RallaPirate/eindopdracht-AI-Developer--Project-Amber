@@ -49,8 +49,8 @@ This follows the locked design's principle that authenticated access is role/per
 - [X] 3.4 Prerequisite: apply the relevant shared Agent safeguards from 7.11 to this workflow before implementation. Implement a bounded Agent flow that retrieves external species data and creates a structured enriched proposal, distinguishing API-supplied data from Agent-generated recommendations.
 - [X] 3.5 Build the Management review UI for the proposed species entry, distinguishing API-supplied data from Agent-generated recommendations.
 - [X] 3.6 Implement explicit acceptance and controlled persistence.
-- [ ] 3.7 Reject unauthorised creation, invalid proposals and duplicate external_species_id values.
-- [ ] 3.8 Implement permitted manual Senior/Management edits.
+- [X] 3.7 Reject unauthorised creation, invalid proposals and duplicate external_species_id values.
+- [X] 3.8 Implement permitted manual Senior/Management edits.
 - [ ] 3.9 Verify the complete workflow locally and deployed.
 The course reference specifically gives us the streamText + tools + Zod inputSchema + bounded-loop pattern we want to adapt rather than inventing our own framework.    amber-course-implementation-ref…
 **Milestone:** Amber has its first complete assessed AI workflow: external API → AI interpretation → human approval → database persistence.
