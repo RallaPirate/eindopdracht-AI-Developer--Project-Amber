@@ -31,6 +31,47 @@ function flushMicrotasks() {
   });
 }
 
+test("presentation survives verification without granting access or retaining the cache epoch", () => {
+  const client = new QueryClient();
+  const cache = createAuthenticatedQueryCache();
+  cache.bindUser(client, "user-a");
+  cache.bindPermission(client, "user-a", "employee");
+  const before = cache.getSnapshot();
+  applyBrowserAuthEvent(cache, client, "SIGNED_IN", "user-a");
+  const pending = cache.getSnapshot();
+  assert.equal(pending.status, "unverified");
+  assert.equal(pending.userId, null);
+  assert.equal(pending.permissionStatus, "unknown");
+  assert.equal(pending.presentation, before.presentation);
+  assert.ok(pending.accessEpoch > before.accessEpoch);
+  cache.bindUser(client, "user-a");
+  cache.bindPermission(client, "user-a", "employee");
+  assert.equal(cache.getSnapshot().presentation, before.presentation);
+  // A role change is destructive even when the intermediate snapshot no
+  // longer contains the old verified role.
+  applyBrowserAuthEvent(cache, client, "SIGNED_IN", "user-a");
+  cache.bindUser(client, "user-a");
+  cache.bindPermission(client, "user-a", "management");
+  assert.notEqual(cache.getSnapshot().presentation?.id, before.presentation?.id);
+  client.clear();
+});
+
+test("an account-switch signal destroys retained presentation during an already pending verification", () => {
+  const client = new QueryClient();
+  const cache = createAuthenticatedQueryCache();
+  cache.bindUser(client, "user-a");
+  cache.bindPermission(client, "user-a", "employee");
+  const before = cache.getSnapshot().presentation;
+  applyBrowserAuthEvent(cache, client, "SIGNED_IN", "user-a");
+  applyBrowserAuthEvent(cache, client, "SIGNED_IN", "user-b");
+  assert.equal(cache.getSnapshot().presentation, null);
+  // Returning to A cannot resurrect state discarded by the intervening signal.
+  cache.bindUser(client, "user-a");
+  cache.bindPermission(client, "user-a", "employee");
+  assert.notEqual(cache.getSnapshot().presentation?.id, before?.id);
+  client.clear();
+});
+
 test("authenticated query keys include the verified user id", () => {
   const key = authenticatedQueryKey("user-a", ["species", "list"]);
   assert.deepEqual(key, ["auth-user", "user-a", "species", "list"]);
@@ -514,6 +555,7 @@ for (const flow of ["login", "registration"] as const) {
       role: "employee",
       displayName: `${flow} user`,
       accessEpoch: cache.getSnapshot().accessEpoch,
+      presentation: { id: 1, userId: "user-a", role: "employee" },
     });
     assert.equal(
       shouldRunAuthenticatedQuery(

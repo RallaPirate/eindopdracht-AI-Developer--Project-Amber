@@ -41,7 +41,7 @@ type ProfileIdentityRow = {
  * Uses the authenticated client and RLS; does not accept role/id from callers.
  */
 export async function resolveLinkedProfile(
-  access: AuthenticatedSupabaseAccess,
+  access: Pick<AuthenticatedSupabaseAccess, "supabase" | "userId">,
 ): Promise<CurrentProfileResult> {
   const { data, error } = await access.supabase
     .from("profiles")

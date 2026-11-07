@@ -40,6 +40,8 @@ export type AuthenticatedMutationContext = {
 
 export type AuthenticatedMutationCallbackContext = AuthenticatedMutationContext & {
   cache: {
+    /** Reads only an existing query owned by this invocation's user and epoch. */
+    getQueryData: <T>(scope: readonly unknown[]) => T | undefined;
     /** Scope excludes the auth-user/user-id prefix. Values only, no updater functions.
      * Updates an existing query from this epoch; missing queries are left for refetch.
      * Stale capabilities silently do nothing, including after an await. */
@@ -77,7 +79,7 @@ type AuthenticatedMutationResult<TData, TError, TVariables, TOnMutateResult> =
     mutateAsync: (...args: MutationCallArgs<TData, TError, TVariables, TOnMutateResult>) => Promise<TData>;
   };
 
-function useVerifiedAuthSnapshot(): AuthAccessSnapshot {
+export function useVerifiedAuthSnapshot(): AuthAccessSnapshot {
   return useSyncExternalStore(
     subscribeVerifiedAuthSnapshot,
     getVerifiedAuthSnapshot,
@@ -232,6 +234,13 @@ export function useAuthenticatedMutation<
   const callbackContext = (call: Invocation): AuthenticatedMutationCallbackContext => ({
     userId: call.access.userId,
     cache: {
+      getQueryData: <T,>(scope: readonly unknown[]): T | undefined => {
+        if (!current(call)) return undefined;
+        const queryKey = authenticatedQueryKey(call.access.userId, scope);
+        const query = queryClient.getQueryCache().find({ queryKey, exact: true });
+        if (query?.meta?.accessEpoch !== call.access.epoch) return undefined;
+        return queryClient.getQueryData<T>(queryKey);
+      },
       setQueryData: (scope, data) => {
         if (!current(call)) return;
         // TanStack interprets functions as updaters. Do not run arbitrary code

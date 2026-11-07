@@ -16,6 +16,13 @@ type DesktopProps = {
   onMoveWindow: (id: ProgramId, x: number, y: number) => void;
 };
 
+const SPECIES_WINDOW_FRAME = {
+  width: 800,
+  height: 520,
+  maxWidth: "calc(100% - 16px)",
+  maxHeight: "calc(100% - 16px)",
+};
+
 /** First column: 4 icons; second column: 1 icon (Personnel). */
 const ICON_LAYOUT: { id: ProgramId; column: number; row: number }[] = [
   { id: "reports", column: 0, row: 0 },
@@ -68,6 +75,7 @@ export function Desktop({
 
       {windows.map((win) => {
         const program = getProgram(win.id);
+        const frame = win.id === "species-database" ? SPECIES_WINDOW_FRAME : {};
         return (
           <Window
             key={win.id}
@@ -79,6 +87,7 @@ export function Desktop({
             onFocus={() => onFocusWindow(win.id)}
             onClose={() => onCloseWindow(win.id)}
             onMove={(x, y) => onMoveWindow(win.id, x, y)}
+            {...frame}
           >
             <ProgramContent id={win.id} />
           </Window>

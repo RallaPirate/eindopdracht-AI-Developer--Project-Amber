@@ -11,6 +11,16 @@ export type WindowState = {
 };
 
 const DEFAULT_OFFSET = 28;
+const DEFAULT_ORIGIN = { x: 80, y: 48 };
+const SPECIES_WINDOW_ORIGIN = { x: 16, y: 16 };
+
+function initialPosition(id: ProgramId, openCount: number) {
+  if (id === "species-database") return SPECIES_WINDOW_ORIGIN;
+  return {
+    x: DEFAULT_ORIGIN.x + openCount * DEFAULT_OFFSET,
+    y: DEFAULT_ORIGIN.y + openCount * DEFAULT_OFFSET,
+  };
+}
 
 function raiseWindow(windows: WindowState[], id: ProgramId): WindowState[] {
   const maxZ = windows.reduce((max, win) => Math.max(max, win.zIndex), 0);
@@ -40,8 +50,7 @@ export function useWindowManager() {
         ...current,
         {
           id,
-          x: 80 + openCount * DEFAULT_OFFSET,
-          y: 48 + openCount * DEFAULT_OFFSET,
+          ...initialPosition(id, openCount),
           zIndex: maxZ + 1,
         },
       ];

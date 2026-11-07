@@ -1,6 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  Activity, Suspense, use, useCallback, useEffect, useRef, useState,
+  useSyncExternalStore, type ReactNode, type SyntheticEvent,
+} from "react";
 import { BootSequence } from "@/components/boot/BootSequence";
 import { DesktopLoading } from "@/components/boot/DesktopLoading";
 import { FullscreenPrompt } from "@/components/boot/FullscreenPrompt";
@@ -50,6 +53,23 @@ type SessionStatus =
 function displayNameFromEmail(email: string): string {
   const trimmed = email.trim();
   return trimmed.length > 0 ? trimmed : "User";
+}
+
+// Activity disconnects Effects while retaining state and DOM. The gate also
+// prevents hidden query subscriptions from rendering loading branches that
+// would otherwise destroy nested forms while the cache is being cleared.
+const pendingVerification = new Promise<never>(() => {});
+function VerifiedDesktop({ children, presentationId }: { children: ReactNode; presentationId: number }) {
+  const access = getVerifiedAuthSnapshot();
+  if (access.status !== "ready" || access.presentation?.id !== presentationId) use(pendingVerification);
+  return children;
+}
+
+function blockUnverifiedInteraction(event: SyntheticEvent, presentationId: number) {
+  const access = getVerifiedAuthSnapshot();
+  if (access.status === "ready" && access.presentation?.id === presentationId) return;
+  event.preventDefault();
+  event.stopPropagation();
 }
 
 function AuthErrorScreen({
@@ -293,6 +313,57 @@ export function BioReserveShell() {
     if (authAccess.status === "revoked") effectivePhase = "authError";
   }
 
+  if (phase === "desktop" && authAccess.presentation) {
+    const blocked = authAccess.status !== "ready";
+    const presentationId = authAccess.presentation.id;
+    const guardInteraction = (event: SyntheticEvent) => blockUnverifiedInteraction(event, presentationId);
+    return (
+      <div className="relative h-full w-full">
+        <div
+          className="h-full w-full"
+          hidden={blocked}
+          inert={blocked}
+          aria-hidden={blocked || undefined}
+          onClickCapture={guardInteraction}
+          onDoubleClickCapture={guardInteraction}
+          onMouseDownCapture={guardInteraction}
+          onPointerDownCapture={guardInteraction}
+          onKeyDownCapture={guardInteraction}
+          onKeyUpCapture={guardInteraction}
+          onInputCapture={guardInteraction}
+          onChangeCapture={guardInteraction}
+          onSubmitCapture={guardInteraction}
+          onFocusCapture={guardInteraction}
+        >
+          <Activity mode={blocked ? "hidden" : "visible"}>
+            <Suspense fallback={null}>
+              <VerifiedDesktop presentationId={presentationId}>
+                <ProtectedDesktop
+                  key={authAccess.presentation.id}
+                  currentUser={authAccess.displayName ?? currentUser}
+                  locale={locale}
+                  soundEnabled={soundEnabled}
+                  signOutError={signOutError}
+                  onDismissError={() => setSignOutError(null)}
+                  onLocaleChange={handleLocaleChange}
+                  onSoundToggle={handleSoundToggle}
+                  onChangeUser={() => { void handleChangeUser(); }}
+                  onReboot={handleReboot}
+                />
+              </VerifiedDesktop>
+            </Suspense>
+          </Activity>
+        </div>
+        {blocked ? (
+          <AuthErrorScreen
+            title="Authentication.exe"
+            message="Verifying identity and profile access. Protected access is suspended."
+          />
+        ) : null}
+      </div>
+    );
+  }
+
   if (effectivePhase === "fullscreen") {
     return <FullscreenPrompt onContinue={startBootCycle} />;
   }
@@ -357,25 +428,10 @@ export function BioReserveShell() {
     return <DesktopLoading onComplete={() => setPhase("desktop")} />;
   }
 
-  return (
-    <ProtectedDesktop
-      key={authAccess.accessEpoch}
-      currentUser={authAccess.displayName ?? currentUser}
-      locale={locale}
-      soundEnabled={soundEnabled}
-      signOutError={signOutError}
-      onDismissError={() => setSignOutError(null)}
-      onLocaleChange={handleLocaleChange}
-      onSoundToggle={handleSoundToggle}
-      onChangeUser={() => {
-        void handleChangeUser();
-      }}
-      onReboot={handleReboot}
-    />
-  );
+  return null;
 }
 
-// Window state and every program instance belong to one verified access epoch.
+// Window state and program instances belong to one verified presentation owner.
 function ProtectedDesktop({
   currentUser,
   locale,

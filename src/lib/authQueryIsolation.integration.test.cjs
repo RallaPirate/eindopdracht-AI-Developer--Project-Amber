@@ -16,11 +16,12 @@ function deferred() {
 
 // Run the real store, listener, shell, dialogs and window manager in an isolated
 // module graph. Only Supabase, browser scheduling, React hooks and leaf UI are
-// mocked. No network, DOM library, new dependency or production test seam.
-function harness(t, initialUser = null) {
+// mocked. The DOM regressions below opt into real React and application UI.
+function harness(t, initialUser = null, { realReact = false, components = {} } = {}) {
   let user = initialUser, authCallback, timerId = 0, activeRenderer;
+  let accessToken = initialUser ? `token-${initialUser}` : null;
   const timers = new Map(), modules = new Map();
-  const claims = [], profiles = [];
+  const claims = [], sessions = [], profiles = [];
   const calls = { claims: 0, signOut: 0, login: 0, registration: 0 };
   const profile = (role = "employee") => ({
     data: { role, display_name: `Profile ${user}` }, error: null,
@@ -28,9 +29,10 @@ function harness(t, initialUser = null) {
   const claimsResult = (id = user) => ({
     data: id ? { claims: { sub: id } } : null, error: null,
   });
-  function emit(event, id = user) {
+  function emit(event, id = user, token) {
+    if (id !== user || token !== undefined) accessToken = token ?? (id ? `token-${id}` : null);
     user = id;
-    authCallback(event, id ? { user: { id } } : null);
+    authCallback(event, id ? { user: { id }, access_token: token } : null);
   }
   async function authenticate(credentials, flow) {
     calls[flow]++;
@@ -41,7 +43,9 @@ function harness(t, initialUser = null) {
   const supabase = {
     auth: {
       getClaims() { calls.claims++; return claims.shift() ?? Promise.resolve(claimsResult()); },
-      getSession: async () => ({ data: { session: user ? { user: { id: user } } : null }, error: null }),
+      getSession: async () => sessions.shift() ?? {
+        data: { session: user ? { user: { id: user }, access_token: accessToken } : null }, error: null,
+      },
       onAuthStateChange(callback) {
         authCallback = callback;
         return { data: { subscription: { unsubscribe() {} } } };
@@ -52,12 +56,19 @@ function harness(t, initialUser = null) {
     },
     from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => profiles.shift() ?? Promise.resolve(profile()) }) }) }),
   };
+  const browserListeners = new Map(), documentListeners = new Map();
   const browser = {
     setTimeout(fn, delay) { const id = ++timerId; timers.set(id, { fn, delay }); return id; },
     clearTimeout: (id) => timers.delete(id),
-    setInterval: () => 0, clearInterval() {}, addEventListener() {}, removeEventListener() {},
+    setInterval: () => 0, clearInterval() {},
+    addEventListener: (event, fn) => browserListeners.set(event, fn),
+    removeEventListener: (event) => browserListeners.delete(event),
   };
-  const document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
+  const document = {
+    visibilityState: "visible",
+    addEventListener: (event, fn) => documentListeners.set(event, fn),
+    removeEventListener: (event) => documentListeners.delete(event),
+  };
   const react = {
     useState: (initial) => activeRenderer.state(initial),
     useRef: (initial) => activeRenderer.ref(initial),
@@ -72,9 +83,11 @@ function harness(t, initialUser = null) {
     return { [name]: component };
   }
   function load(request, parent = path.join(root, "src/lib/entry.ts")) {
-    if (request === "react") return react;
+    if (components[request]) return components[request];
+    if (request === "react") return realReact ? require("react") : react;
     if (request === "@tanstack/react-query") {
       const actual = require(request);
+      if (realReact) return actual;
       return {
         ...actual,
         useQueryClient: () => load("./queryClient.ts").getQueryClient(),
@@ -90,13 +103,14 @@ function harness(t, initialUser = null) {
         },
       };
     }
-    if (request === "react/jsx-runtime") return { jsx, jsxs: jsx };
+    if (request === "react/jsx-runtime") return realReact ? require(request) : { jsx, jsxs: jsx };
     if (request === "@/lib/supabase") return { getSupabaseBrowserClient: () => supabase };
     if (request === "@/lib/preferences") return {
       readLocale: () => "en", readSoundEnabled: () => true,
-      subscribeLocale() {}, subscribeSound() {}, writeLocale() {}, writeSoundEnabled() {},
+      subscribeLocale: () => () => {}, subscribeSound: () => () => {}, writeLocale() {}, writeSoundEnabled() {},
     };
-    if (request.startsWith("@/components/") && !request.endsWith("useWindowManager")) {
+    if (request.startsWith("@/components/") && !request.endsWith("useWindowManager") &&
+        !(realReact && request.startsWith("@/components/desktop/"))) {
       return leaf(path.basename(request));
     }
     if (!request.startsWith(".") && !request.startsWith("@/")) return require(request);
@@ -154,11 +168,13 @@ function harness(t, initialUser = null) {
         } while (dirty);
         // Reconcile the protected boundary as React does: same key retains
         // its hook state; leaving the subtree or changing key discards it.
-        if (view?.type?.name === "ProtectedDesktop") {
-          if (!child || child.key !== view.key) {
-            child = { key: view.key, renderer: renderer(view.type, view.props) };
+        const protectedView = named(view, "ProtectedDesktop");
+        if (protectedView) {
+          if (!child || child.key !== protectedView.key) {
+            child = { key: protectedView.key, renderer: renderer(protectedView.type, protectedView.props) };
           }
-          Object.assign(child.renderer.props, view.props);
+          if (qc.getVerifiedAuthSnapshot().status !== "ready") return named(view, "AuthErrorScreen");
+          Object.assign(child.renderer.props, protectedView.props);
           return child.renderer.render();
         }
         child = undefined;
@@ -170,9 +186,10 @@ function harness(t, initialUser = null) {
   }
   const auth = load("./authQueryIsolation.ts");
   const qc = load("./queryClient.ts");
-  const shell = renderer(load("../components/desktop/BioReserveShell.tsx").BioReserveShell);
+  const Shell = load("../components/desktop/BioReserveShell.tsx").BioReserveShell;
+  const shell = renderer(Shell);
   const stop = auth.startAuthQueryIsolation();
-  t.after(() => { stop(); qc.getQueryClient().clear(); });
+  t.after(() => { stop(); if (!realReact) qc.getQueryClient().clear(); });
   function fire(delay) {
     const pending = [...timers].filter(([, timer]) => timer.delay === delay);
     for (const [id, timer] of pending) { timers.delete(id); timer.fn(); }
@@ -185,7 +202,12 @@ function harness(t, initialUser = null) {
     qc.getQueryClient().setQueryData(key, ["private-row"]);
     return key;
   }
-  return { auth, qc, shell, load, renderer, emit, fire, timers, claims, profiles, calls, profile, claimsResult, seed };
+  function visibility(state) {
+    document.visibilityState = state;
+    documentListeners.get("visibilitychange")?.();
+  }
+  const dispatchBrowser = (event, value) => browserListeners.get(event)?.(value);
+  return { auth, qc, shell, Shell, load, renderer, emit, fire, visibility, dispatchBrowser, timers, claims, sessions, profiles, calls, profile, claimsResult, seed };
 }
 
 function find(view, predicate) {
@@ -198,6 +220,218 @@ function find(view, predicate) {
   return null;
 }
 function named(view, name) { return find(view, (node) => node.type?.name === name); }
+
+// Real React DOM reconciliation, Activity, Suspense, events and hook lifetimes.
+// JSDOM does not implement browser inert hit testing; assertions cover the native
+// hidden/inert/a11y attributes AND rejection of synthetic events at capture.
+async function domHarness(t) {
+  const { JSDOM } = require("jsdom");
+  const dom = new JSDOM("<!doctype html><div id='root'></div>", { url: "http://localhost" });
+  const previous = new Map();
+  for (const [name, value] of Object.entries({
+    window: dom.window, document: dom.window.document,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  })) {
+    previous.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+  const React = require("react");
+  const { createRoot } = require("react-dom/client");
+  const { QueryClientProvider } = require("@tanstack/react-query");
+  const e = React.createElement;
+  const counts = { instances: 0, ticks: 0, submits: 0, keys: 0, reads: 0, blockedRenders: 0 };
+  let h, latestTaskbar;
+  function DraftForm() {
+    const [instance] = React.useState(() => ++counts.instances);
+    const [value, setValue] = React.useState("");
+    const [selected, setSelected] = React.useState("record-a");
+    React.useEffect(() => {
+      const tick = () => { counts.ticks++; };
+      dom.window.addEventListener("protected-tick", tick);
+      return () => dom.window.removeEventListener("protected-tick", tick);
+    }, []);
+    return e("form", {
+      "data-instance": instance,
+      onSubmit: (event) => { event.preventDefault(); counts.submits++; },
+      onKeyDown: () => { counts.keys++; },
+    }, e("input", { "aria-label": "Draft", value, onChange: (event) => setValue(event.target.value) }),
+    e("select", { "aria-label": "Selected record", value: selected, onChange: (event) => setSelected(event.target.value) },
+      e("option", { value: "record-a" }, "A"), e("option", { value: "record-b" }, "B")),
+    e("button", { type: "submit" }, "Save"));
+  }
+  function ProgramContent({ id }) {
+    if (h.qc.getVerifiedAuthSnapshot().status !== "ready") counts.blockedRenders++;
+    const hooks = h.load("../hooks/useAuthenticatedQuery.ts");
+    // Keep actual authenticated observers mounted across cache cancellation.
+    hooks.useAuthenticatedQuery({
+      queryKey: ["dom-regression", id],
+      queryFn: async () => { counts.reads++; return ["record"]; },
+    });
+    return e(DraftForm);
+  }
+  const components = { "@/components/programs/ProgramContent": { ProgramContent } };
+  for (const [name, callback] of [
+    ["FullscreenPrompt", "onContinue"], ["BootSequence", "onComplete"],
+    ["WelcomeBackDialog", "onComplete"], ["DesktopLoading", "onComplete"],
+  ]) {
+    components[`@/components/boot/${name}`] = {
+      [name]: (props) => e("button", { onClick: props[callback] }, name),
+    };
+  }
+  components["@/components/boot/LoginDialog"] = {
+    LoginDialog: (props) => e("button", { onClick: () => props.onExecute("a@example.com") }, "Login"),
+  };
+  components["@/components/desktop/Taskbar"] = {
+    Taskbar: (props) => {
+      latestTaskbar = props;
+      return e("button", { onClick: props.onChangeUser }, "Logout");
+    },
+  };
+  h = harness(t, "user-a", { realReact: true, components });
+  h.qc.getQueryClient().setDefaultOptions({ queries: { gcTime: Infinity }, mutations: { gcTime: Infinity } });
+  const container = dom.window.document.getElementById("root");
+  const root = createRoot(container);
+  const act = async (fn = () => {}) => React.act(async () => { await fn(); await flush(); });
+  t.after(async () => {
+    await act(() => root.unmount());
+    h.qc.getQueryClient().clear();
+    dom.window.close();
+    for (const [name, descriptor] of previous) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+  });
+  await act(() => root.render(e(QueryClientProvider, { client: h.qc.getQueryClient() }, e(h.Shell))));
+  const button = (text) => [...container.querySelectorAll("button")].find((node) => node.textContent === text);
+  const click = async (text) => {
+    assert.ok(button(text), `button ${text} exists`);
+    await act(() => button(text).click());
+  };
+  for (const name of ["FullscreenPrompt", "BootSequence", "WelcomeBackDialog", "DesktopLoading"]) await click(name);
+  const draft = () => container.querySelector("input[aria-label='Draft']");
+  const input = async (value) => act(() => {
+    // Invoke the native setter so React's value tracker detects a user edit.
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value").set.call(draft(), value);
+    draft().dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  });
+  const tick = () => dom.window.dispatchEvent(new dom.window.Event("protected-tick"));
+  return { ...h, dom, container, act, click, draft, input, tick, counts, taskbar: () => latestTaskbar };
+}
+
+test("React DOM: repeated same-user tab recovery preserves windows, focus and unsaved form instances", async (t) => {
+  const h = await domHarness(t);
+  await h.click("Reports.exe");
+  await h.click("Archive.exe");
+  await h.act(() => {
+    // Exercise the real Window drag handlers and useWindowManager positions.
+    const titlebar = h.container.querySelector("[aria-label='Close Reports.exe']").parentElement;
+    titlebar.dispatchEvent(new h.dom.window.MouseEvent("mousedown", { bubbles: true, button: 0, clientX: 85, clientY: 53 }));
+    h.dispatchBrowser("mousemove", { clientX: 235, clientY: 125 });
+    // Leave the drag active: hiding Activity must clean up its global handlers.
+  });
+  const reportWindow = h.taskbar().windows.find((win) => win.id === "reports");
+  assert.equal(reportWindow.x, 230);
+  assert.equal(reportWindow.y, 120);
+  assert.equal(h.taskbar().activeId, "reports");
+  assert.ok(reportWindow.zIndex > h.taskbar().windows.find((win) => win.id === "archive").zIndex);
+  await h.input("Unsubmitted field notes");
+  await h.act(() => {
+    const select = h.container.querySelector("select");
+    select.value = "record-b";
+    select.dispatchEvent(new h.dom.window.Event("change", { bubbles: true }));
+  });
+  const original = h.draft(), form = original.closest("form");
+  const before = h.taskbar().windows;
+  const active = h.taskbar().activeId;
+  const mounts = h.counts.instances;
+  for (let i = 0; i < 3; i++) {
+    const epoch = h.qc.getVerifiedAuthSnapshot().accessEpoch;
+    await h.act(() => { h.visibility("hidden"); h.visibility("visible"); });
+    // A SIGNED_IN event without a token still takes the strict path.
+    await h.act(() => {
+      h.emit("SIGNED_IN");
+      // Events arriving before React commits concealment must also be blocked.
+      form.dispatchEvent(new h.dom.window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    const boundary = h.container.querySelector("[inert]");
+    assert.ok(boundary?.hidden);
+    assert.equal(boundary.getAttribute("aria-hidden"), "true");
+    assert.match(h.container.textContent, /Protected access is suspended/);
+    assert.equal(h.qc.getVerifiedAuthSnapshot().status, "unverified");
+    const ticks = h.counts.ticks, reads = h.counts.reads;
+    h.tick();
+    assert.equal(h.counts.ticks, ticks, "hidden Activity disconnected effect subscriptions");
+    await h.act(() => {
+      original.dispatchEvent(new h.dom.window.KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+      form.dispatchEvent(new h.dom.window.Event("submit", { bubbles: true, cancelable: true }));
+      h.container.querySelector("button").click();
+      h.dispatchBrowser("mousemove", { clientX: 900, clientY: 900 });
+    });
+    assert.equal(h.counts.keys, 0);
+    assert.equal(h.counts.submits, 0);
+    assert.equal(h.counts.reads, reads, "no authenticated fetch while unverified");
+    assert.equal(h.counts.blockedRenders, 0, "the verification gate preserves the paused application tree");
+    await h.act(() => h.fire(0));
+    assert.equal(h.qc.getVerifiedAuthSnapshot().status, "ready");
+    assert.ok(h.qc.getVerifiedAuthSnapshot().accessEpoch > epoch);
+    assert.equal(h.container.querySelector("[inert]"), null);
+    assert.equal(h.draft(), original, "the same input DOM node survives");
+    assert.equal(h.draft().closest("form"), form);
+    assert.equal(h.draft().value, "Unsubmitted field notes");
+    assert.equal(h.container.querySelector("select").value, "record-b");
+    assert.equal(h.counts.instances, mounts, "form state initializers did not run again");
+    assert.deepEqual(h.taskbar().windows, before);
+    assert.equal(h.taskbar().activeId, active);
+    const resumedTicks = h.counts.ticks;
+    h.tick();
+    assert.ok(h.counts.ticks > resumedTicks);
+    const readyEpoch = h.qc.getVerifiedAuthSnapshot().accessEpoch;
+    await h.act(() => { h.emit("TOKEN_REFRESHED"); h.fire(0); });
+    assert.equal(h.qc.getVerifiedAuthSnapshot().accessEpoch, readyEpoch);
+    assert.equal(h.draft(), original);
+    assert.equal(h.draft().value, "Unsubmitted field notes");
+    assert.deepEqual(h.taskbar().windows, before);
+  }
+  // Fast verification must preserve the same instance even if React never
+  // commits the intermediate unverified snapshot.
+  await h.act(() => { h.emit("SIGNED_IN"); h.fire(0); });
+  assert.equal(h.draft(), original);
+  assert.equal(h.counts.instances, mounts);
+  assert.deepEqual(h.taskbar().windows, before);
+});
+
+for (const transition of ["logout then same account", "account switch", "revocation", "role change during verification"]) {
+  test(`React DOM: ${transition} destroys protected presentation and drafts`, async (t) => {
+    const h = await domHarness(t);
+    await h.click("Reports.exe"); await h.input("Private draft");
+    const original = h.draft();
+    const lifetime = h.qc.getVerifiedAuthSnapshot().presentation.id;
+    if (transition === "logout then same account") {
+      // Include all transitions in one React batch so no intermediate render
+      // can be relied upon to notice the signed-out state.
+      await h.act(() => { h.emit("SIGNED_OUT", null); h.emit("SIGNED_IN", "user-a"); h.fire(0); });
+    } else if (transition === "account switch") {
+      await h.act(() => { h.emit("SIGNED_IN", "user-b"); h.fire(0); });
+    } else if (transition === "revocation") {
+      h.profiles.push(Promise.resolve({ data: null, error: null }));
+      await h.act(() => { h.emit("SIGNED_IN"); h.fire(0); });
+      assert.equal(h.qc.getVerifiedAuthSnapshot().presentation, null);
+      assert.equal(original.isConnected, false);
+      await h.act(() => h.auth.requestAuthQuerySync());
+    } else {
+      h.profiles.push(Promise.resolve(h.profile("management")));
+      await h.act(() => { h.emit("SIGNED_IN"); h.fire(0); });
+    }
+    assert.equal(original.isConnected, false);
+    assert.notEqual(h.qc.getVerifiedAuthSnapshot().presentation.id, lifetime);
+    assert.equal(h.draft(), null);
+    assert.equal(h.taskbar().windows.length, 0);
+    assert.equal(h.taskbar().activeId, null);
+    await h.click("Reports.exe");
+    assert.equal(h.draft().value, "");
+    assert.notEqual(h.draft(), original);
+  });
+}
 async function boot(h) {
   h.shell.render().props.onContinue();
   h.shell.render(); await flush();
@@ -216,7 +450,7 @@ test("boot follows replacement verification after the pending claims check is su
   const h = harness(t, "user-a"); await flush();
   h.shell.render().props.onContinue();
   const pending = deferred(); h.claims.push(pending.promise);
-  h.shell.render();
+  h.shell.render(); await flush();
   h.emit("TOKEN_REFRESHED");
   pending.resolve(h.claimsResult()); await flush();
   h.shell.render().props.onComplete();
@@ -229,7 +463,7 @@ test("boot waits through an intermediate unverified result and resumes when the 
   const h = harness(t); await flush();
   h.shell.render().props.onContinue();
   const pending = deferred(); h.claims.push(pending.promise);
-  h.shell.render();
+  h.shell.render(); await flush();
   h.emit("SIGNED_IN", "user-a");
   pending.resolve(h.claimsResult(null)); await flush();
   h.shell.render().props.onComplete();
@@ -251,6 +485,95 @@ test("same-user token refresh retains epoch, query data and the rendered desktop
   assert.ok(named(h.shell.render(), "Desktop"));
   assert.equal(named(h.shell.render(), "LoginDialog"), null);
   assert.deepEqual(h.qc.getQueryClient().getQueryData(key), ["private-row"]);
+});
+
+test("visibility recovery of the verified Management token keeps the epoch and cache", async (t) => {
+  const h = harness(t, "user-a");
+  h.profiles.push(Promise.resolve(h.profile("management")));
+  await flush();
+  const before = h.qc.getVerifiedAuthSnapshot(), key = h.seed();
+  const claimsBefore = h.calls.claims;
+  const profileRead = deferred();
+  h.profiles.push(profileRead.promise);
+
+  h.visibility("hidden");
+  h.visibility("visible");
+  h.emit("SIGNED_IN", "user-a", "token-user-a");
+  assert.equal(h.qc.getVerifiedAuthSnapshot(), before);
+  h.fire(0);
+  await flush();
+  assert.equal(h.calls.claims, claimsBefore + 1);
+  assert.equal(h.qc.getVerifiedAuthSnapshot(), before);
+
+  profileRead.resolve(h.profile("management"));
+  await flush();
+  assert.equal(h.qc.getVerifiedAuthSnapshot(), before);
+  assert.deepEqual(h.qc.getQueryClient().getQueryData(key), ["private-row"]);
+});
+
+for (const [label, userId, token] of [
+  ["a new session for the same account", "user-a", "new-token-user-a"],
+  ["a different account", "user-b", "token-user-b"],
+  ["an event without a token", "user-a", undefined],
+]) {
+  test(`SIGNED_IN for ${label} immediately invalidates old access`, async (t) => {
+    const h = harness(t, "user-a"); await flush();
+    const before = h.qc.getVerifiedAuthSnapshot(), key = h.seed();
+    h.emit("SIGNED_IN", userId, token);
+    assert.equal(h.qc.getVerifiedAuthSnapshot().status, "unverified");
+    assert.ok(h.qc.getVerifiedAuthSnapshot().accessEpoch > before.accessEpoch);
+    assert.equal(h.qc.getQueryClient().getQueryData(key), undefined);
+    h.fire(0); await flush();
+    assert.equal(h.qc.getVerifiedAuthSnapshot().userId, userId);
+  });
+}
+
+for (const [label, read, status] of [
+  ["a downgrade", (h) => h.profile("employee"), "ready"],
+  ["revocation", () => ({ data: null, error: null }), "revoked"],
+  ["an unavailable profile", () => ({ data: null, error: {} }), "suspended"],
+]) {
+  test(`matching-token recovery invalidates Management access after ${label}`, async (t) => {
+    const h = harness(t, "user-a");
+    h.profiles.push(Promise.resolve(h.profile("management")));
+    await flush();
+    const before = h.qc.getVerifiedAuthSnapshot(), key = h.seed();
+    h.profiles.push(Promise.resolve(read(h)));
+    h.emit("SIGNED_IN", "user-a", "token-user-a");
+    h.fire(0); await flush();
+    const after = h.qc.getVerifiedAuthSnapshot();
+    assert.equal(after.status, status);
+    assert.notEqual(after.role, "management");
+    assert.ok(after.accessEpoch > before.accessEpoch);
+    assert.equal(h.qc.getQueryClient().getQueryData(key), undefined);
+  });
+}
+
+test("a superseding visibility check still invalidates recovery if claims are unavailable", async (t) => {
+  const h = harness(t, "user-a"); await flush();
+  const before = h.qc.getVerifiedAuthSnapshot(), key = h.seed();
+  h.emit("SIGNED_IN", "user-a", "token-user-a");
+  h.claims.push(Promise.resolve({ data: null, error: { name: "AuthRetryableFetchError" } }));
+  h.visibility("hidden");
+  h.visibility("visible");
+  h.fire(0); await flush();
+  assert.equal(h.qc.getVerifiedAuthSnapshot().status, "unverified");
+  assert.ok(h.qc.getVerifiedAuthSnapshot().accessEpoch > before.accessEpoch);
+  assert.equal(h.qc.getQueryClient().getQueryData(key), undefined);
+});
+
+test("matching-token recovery invalidates access if the active token changes during verification", async (t) => {
+  const h = harness(t, "user-a"); await flush();
+  const before = h.qc.getVerifiedAuthSnapshot(), key = h.seed();
+  h.emit("SIGNED_IN", "user-a", "token-user-a");
+  h.sessions.push(
+    { data: { session: { user: { id: "user-a" }, access_token: "token-user-a" } }, error: null },
+    { data: { session: { user: { id: "user-a" }, access_token: "new-token-user-a" } }, error: null },
+  );
+  h.fire(0); await flush();
+  assert.equal(h.qc.getVerifiedAuthSnapshot().status, "unverified");
+  assert.ok(h.qc.getVerifiedAuthSnapshot().accessEpoch > before.accessEpoch);
+  assert.equal(h.qc.getQueryClient().getQueryData(key), undefined);
 });
 
 for (const reason of ["unexpected sign-out", "session expiry"]) {
@@ -297,7 +620,7 @@ test("refresh with a changed identity or revoked profile still blocks access and
 test("an obsolete rejection cannot schedule a retry over a newer pending profile read", async (t) => {
   const h = harness(t, "user-a"); await flush();
   const old = deferred(); h.claims.push(old.promise);
-  const obsolete = h.auth.requestAuthQuerySync();
+  const obsolete = h.auth.requestAuthQuerySync(); await flush();
   const profile = deferred(); h.profiles.push(profile.promise);
   const current = h.auth.requestAuthQuerySync(); await flush();
   old.reject(new Error("obsolete network failure")); await obsolete;
@@ -636,9 +959,16 @@ test("current-epoch callback capabilities update scoped cache data and invalidat
   assert.deepEqual(h.qc.getQueryClient().getQueryData(key), ["confirmed"]);
   assert.equal(h.qc.getQueryClient().getQueryState(key).isInvalidated, true);
   assert.equal(execution.client, undefined);
+  assert.deepEqual(execution.cache.getQueryData(["private"]), ["confirmed"]);
   let updaterRan = false;
   assert.throws(() => execution.cache.setQueryData(["private"], () => { updaterRan = true; }), { name: "TypeError" });
   assert.equal(updaterRan, false);
   execution.cache.setQueryData(["missing"], ["must refetch instead"]);
   assert.equal(h.qc.getQueryClient().getQueryData(["auth-user", "user-a", "missing"]), undefined);
+  assert.equal(execution.cache.getQueryData(["missing"]), undefined);
+  h.qc.clearBrowserQueryCache();
+  h.seed();
+  assert.equal(execution.cache.getQueryData(["private"]), undefined);
+  execution.cache.setQueryData(["private"], ["stale saved row"]);
+  assert.notDeepEqual(h.qc.getQueryClient().getQueryData(key), ["stale saved row"]);
 });

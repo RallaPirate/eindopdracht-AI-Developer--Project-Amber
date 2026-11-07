@@ -27,6 +27,7 @@ const SERVER_AUTH_SNAPSHOT: AuthAccessSnapshot = Object.freeze({
   role: null,
   displayName: null,
   accessEpoch: 0,
+  presentation: null,
 });
 
 const browserQueryIdentity = createAuthenticatedQueryCache();
