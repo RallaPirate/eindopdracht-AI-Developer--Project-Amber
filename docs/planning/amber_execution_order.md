@@ -47,7 +47,7 @@ This follows the locked design's principle that authenticated access is role/per
 - [X] 3.2 Implement the dedicated external Species API tool.
 - [X] 3.3 Install/configure the Vercel AI SDK and Zod using the course agent pattern.
 - [X] 3.4 Prerequisite: apply the relevant shared Agent safeguards from 7.11 to this workflow before implementation. Implement a bounded Agent flow that retrieves external species data and creates a structured enriched proposal, distinguishing API-supplied data from Agent-generated recommendations.
-- [ ] 3.5 Build the Management review UI for the proposed species entry, distinguishing API-supplied data from Agent-generated recommendations.
+- [X] 3.5 Build the Management review UI for the proposed species entry, distinguishing API-supplied data from Agent-generated recommendations.
 - [ ] 3.6 Implement explicit acceptance and controlled persistence.
 - [ ] 3.7 Reject unauthorised creation, invalid proposals and duplicate external_species_id values.
 - [ ] 3.8 Implement permitted manual Senior/Management edits.

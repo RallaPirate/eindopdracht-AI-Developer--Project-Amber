@@ -1,14 +1,20 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { requestSpeciesEnrichment } from "@/components/programs/requestSpeciesEnrichment";
-import { SpeciesProposalReview } from "@/components/programs/SpeciesProposalReview";
+import {
+  requestSpeciesAcceptance,
+  requestSpeciesEnrichment,
+  SpeciesAcceptanceFailure,
+  type SpeciesAcceptanceRequest,
+} from "@/components/programs/requestSpeciesEnrichment";
+import { SPECIES_DATABASE_QUERY_KEY } from "@/components/programs/speciesDatabaseView";
+import { SpeciesProposalAcceptance } from "@/components/programs/SpeciesProposalReview";
 import { Win95Button } from "@/components/ui/Win95Button";
 import {
   useAuthenticatedMutation,
   useVerifiedAuthSnapshot,
 } from "@/hooks/useAuthenticatedQuery";
-import type { SpeciesEnrichmentProposal } from "@/lib/ai/speciesEnrichmentSchemas";
+import type { SpeciesEnrichmentAcceptance } from "@/lib/ai/speciesEnrichmentSchemas";
 import { isAppFailure, toUserMessage } from "@/lib/appResult";
 import { requestAuthQuerySync, requestFreshAuthQuerySync } from "@/lib/authQueryIsolation";
 import { EXTERNAL_SPECIES_NAME_RAW_MAX_LENGTH } from "@/lib/externalSpecies";
@@ -32,11 +38,12 @@ import {
 
 type HeldEnrichment = HeldSpeciesSelection & (
   | { status: "pending" }
-  | { status: "ready"; proposal: SpeciesEnrichmentProposal }
+  | ({ status: "ready"; generation: number } & Awaited<ReturnType<typeof requestSpeciesEnrichment>>)
   | { status: "failed" }
 );
 
-type EnrichmentDenial = Pick<HeldSpeciesSelection, "userId" | "accessEpoch"> & {
+type ProposalNotice = Pick<HeldSpeciesSelection, "userId" | "accessEpoch"> & {
+  kind: "error" | "success";
   message: string;
 };
 
@@ -45,11 +52,12 @@ export function SpeciesProposalPanel() {
   const [name, setName] = useState("");
   const [chosenId, setChosenId] = useState<string | null>(null);
   const [held, setHeld] = useState<HeldEnrichment | null>(null);
-  const [denial, setDenial] = useState<EnrichmentDenial | null>(null);
+  const [notice, setNotice] = useState<ProposalNotice | null>(null);
   const [owned, setOwned] = useState<OwnedSpeciesLookup | null>(null);
   const nameRef = useRef(name);
   const proposalGeneration = useRef(0);
   const generationInFlight = useRef<HeldSpeciesSelection | null>(null);
+  const saveInFlight = useRef<number | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -91,6 +99,38 @@ export function SpeciesProposalPanel() {
       return proposal;
     },
   });
+  const save = useAuthenticatedMutation({
+    mutationKey: ["species-acceptance"],
+    retry: false,
+    gcTime: 0,
+    networkMode: "always",
+    mutationFn: async ({ selection, generation, request }: {
+      selection: HeldSpeciesSelection;
+      generation: number;
+      request: SpeciesAcceptanceRequest;
+    }) => {
+      const started = getVerifiedAuthSnapshot();
+      if (!isCurrentSelection(selection, generation)) throw new AuthenticatedQueryIdentityError();
+      const verified = await requestFreshAuthQuerySync();
+      if (
+        !verified ||
+        !sameManagementAccess(started, verified, getVerifiedAuthSnapshot()) ||
+        !isCurrentSelection(selection, generation)
+      ) {
+        throw new AuthenticatedQueryIdentityError();
+      }
+      await requestSpeciesAcceptance(request);
+    },
+    onSuccess: (_data, _variables, _result, { cache }) => {
+      void cache.invalidateQueries(SPECIES_DATABASE_QUERY_KEY);
+    },
+    onError: (error, _variables, _result, { cache }) => {
+      if (error instanceof SpeciesAcceptanceFailure &&
+        (error.reason === "unconfirmed" || error.reason === "duplicate")) {
+        void cache.invalidateQueries(SPECIES_DATABASE_QUERY_KEY);
+      }
+    },
+  });
 
   if (owned && !speciesLookupAccessOwns(owned, access)) {
     setOwned(null);
@@ -100,25 +140,28 @@ export function SpeciesProposalPanel() {
   const shown = visibleConfirmedSpecies(held, access);
   if (held && !shown) setHeld(null);
   const currentEnrichment = shown ? held : null;
-  const visibleDenial =
-    offered && denial?.userId === access.userId && denial.accessEpoch === access.accessEpoch
-      ? denial.message
+  const visibleNotice =
+    offered && notice?.userId === access.userId && notice.accessEpoch === access.accessEpoch
+      ? notice
       : null;
-  if (denial && !visibleDenial) setDenial(null);
+  if (notice && !visibleNotice) setNotice(null);
   const lookupCurrent =
     speciesLookupAccessOwns(owned, access) && owned.submittedName === name;
   const matches = visibleSpeciesMatches(owned, access, name);
   const chosen = matches.find((match) => match.external_species_id === chosenId) ?? null;
   const errorMessage =
     offered && lookup.isError ? speciesLookupMessage(lookup.error) : null;
+  const saveFailure = save.error instanceof SpeciesAcceptanceFailure ? save.error : null;
+  const saveBlocked = saveFailure !== null && saveFailure.reason !== "validation";
 
   function discardTransient() {
     proposalGeneration.current += 1;
     setOwned(null);
     setChosenId(null);
     setHeld(null);
-    setDenial(null);
+    setNotice(null);
     lookup.reset();
+    save.reset();
   }
 
   function isCurrentSelection(selection: HeldSpeciesSelection, generation: number) {
@@ -200,9 +243,9 @@ export function SpeciesProposalPanel() {
     setHeld({ ...selection, status: "pending" });
     setChosenId(null);
     try {
-      const proposal = await enrichment.mutateAsync({ selection, generation });
+      const review = await enrichment.mutateAsync({ selection, generation });
       if (isCurrentSelection(selection, generation)) {
-        setHeld({ ...selection, status: "ready", proposal });
+        setHeld({ ...selection, status: "ready", generation, ...review });
       }
     } catch (error) {
       if (!isCurrentSelection(selection, generation)) return;
@@ -210,7 +253,8 @@ export function SpeciesProposalPanel() {
         isAppFailure(error) && (error.code === "unauthenticated" || error.code === "unauthorized");
       if (accessDenied || error instanceof AuthenticatedQueryIdentityError) {
         discardTransient();
-        setDenial({
+        setNotice({
+          kind: "error",
           userId: selection.userId,
           accessEpoch: selection.accessEpoch,
           message: accessDenied
@@ -230,7 +274,43 @@ export function SpeciesProposalPanel() {
     }
   }
 
+  async function onAccept(acceptance: SpeciesEnrichmentAcceptance) {
+    if (held?.status !== "ready") return;
+    const { generation } = held;
+    if (saveBlocked || saveInFlight.current === generation ||
+      !isCurrentSelection(held, generation)) return;
+
+    const { userId, accessEpoch, external_species_id, scientific_name, signedProposal } = held;
+    const selection = { userId, accessEpoch, external_species_id, scientific_name };
+    saveInFlight.current = generation;
+    try {
+      await save.mutateAsync({ selection, generation, request: {
+        signed_proposal: signedProposal,
+        accepted_entry: acceptance.accepted_entry,
+        management_completions: acceptance.management_completions,
+      } });
+      if (!isCurrentSelection(selection, generation)) return;
+      discardTransient();
+      setNotice({ kind: "success", userId, accessEpoch, message: "Species saved." });
+    } catch (error) {
+      if (!isCurrentSelection(selection, generation)) return;
+      const accessDenied = isAppFailure(error) &&
+        (error.code === "unauthenticated" || error.code === "unauthorized");
+      if (accessDenied || error instanceof AuthenticatedQueryIdentityError) {
+        discardTransient();
+        setNotice({
+          kind: "error", userId, accessEpoch,
+          message: accessDenied ? toUserMessage(error) : "Unable to verify Management access. Please search again.",
+        });
+        if (accessDenied) void requestAuthQuerySync();
+      }
+    } finally {
+      if (saveInFlight.current === generation) saveInFlight.current = null;
+    }
+  }
+
   function onSearchAgain() {
+    if (saveInFlight.current === proposalGeneration.current) return;
     discardTransient();
   }
 
@@ -248,7 +328,7 @@ export function SpeciesProposalPanel() {
       type="button"
       className="shrink-0"
       onClick={onSearchAgain}
-      disabled={lookup.isPending}
+      disabled={lookup.isPending || save.isPending}
     >
       {SPECIES_PROPOSAL_COPY.searchAgain}
     </Win95Button>
@@ -259,9 +339,13 @@ export function SpeciesProposalPanel() {
       {currentEnrichment ? (
         <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
           {currentEnrichment.status === "ready" ? (
-            <SpeciesProposalReview
+            <SpeciesProposalAcceptance
               proposal={currentEnrichment.proposal}
               actions={searchAgainButton}
+              pending={save.isPending}
+              blocked={saveBlocked}
+              error={saveFailure?.message ?? null}
+              onAccept={onAccept}
             />
           ) : (
             <>
@@ -323,7 +407,9 @@ export function SpeciesProposalPanel() {
             <p role="status">{SPECIES_PROPOSAL_COPY.searching}</p>
           ) : null}
           {errorMessage ? <p role="alert">{errorMessage}</p> : null}
-          {visibleDenial ? <p role="alert">{visibleDenial}</p> : null}
+          {visibleNotice ? (
+            <p role={visibleNotice.kind === "success" ? "status" : "alert"}>{visibleNotice.message}</p>
+          ) : null}
           {enrichment.isPending ? (
             <p role="status">Waiting for the previous generation to finish…</p>
           ) : null}

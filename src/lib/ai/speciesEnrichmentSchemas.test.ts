@@ -8,6 +8,7 @@ import {
   EXTERNAL_SPECIES_SOURCE_SYSTEM,
   externalSpeciesFactsSchema,
   parseSpeciesEnrichmentRequest,
+  speciesEnrichmentAcceptanceSchema,
   speciesEnrichmentModelOutputSchema,
   speciesEnrichmentProposalSchema,
   validateSpeciesEnrichmentModelProposal,
@@ -509,6 +510,213 @@ describe("assembled species enrichment proposal", () => {
       }).success,
       false,
     );
+  });
+});
+
+describe("species enrichment acceptance", () => {
+  function acceptanceWithCompleteProposal() {
+    const result = assembleSpeciesEnrichmentProposal({
+      source: sourceRecord(),
+      modelProposal: completeModel(),
+      retrievedAt: RETRIEVED_AT,
+    });
+    assert.ok(result.ok);
+    return {
+      proposal: result.data,
+      accepted_entry: { ...result.data.proposed_entry },
+      management_completions: {},
+    };
+  }
+
+  function acceptanceWithCompletions() {
+    const model = completeModel();
+    const result = assembleSpeciesEnrichmentProposal({
+      source: sourceRecord({ scientific_name: "  " }),
+      modelProposal: {
+        ...model,
+        handling_guidance: null,
+        minimum_handlers: null,
+        safety_class: null,
+        provenance: {
+          ...model.provenance,
+          handling_guidance: unresolvedProvenance("No handling evidence."),
+          minimum_handlers: unresolvedProvenance("No staffing evidence."),
+          safety_class: unresolvedProvenance("No risk assessment."),
+        },
+      },
+      retrievedAt: RETRIEVED_AT,
+    });
+    assert.ok(result.ok);
+    const completions = {
+      display_name: { value: "Brambleback", justification: "Name from the intake record." },
+      handling_guidance: { value: "Use a gate barrier.", justification: "Verified on site." },
+      minimum_handlers: { value: 3, justification: "Required by the staffing assessment." },
+      safety_class: { value: "high", justification: "Based on the reserve risk assessment." },
+    };
+    return {
+      proposal: result.data,
+      accepted_entry: {
+        ...result.data.proposed_entry,
+        display_name: completions.display_name.value,
+        handling_guidance: completions.handling_guidance.value,
+        minimum_handlers: completions.minimum_handlers.value,
+        safety_class: completions.safety_class.value,
+      },
+      management_completions: completions,
+    };
+  }
+
+  test("accepts a complete proposal and preserves the full original record", () => {
+    const input = acceptanceWithCompleteProposal();
+    assert.deepEqual(speciesEnrichmentAcceptanceSchema.parse(input), input);
+  });
+
+  test("accepts explicit Management completions while retaining the original nulls and provenance", () => {
+    const input = acceptanceWithCompletions();
+    assert.deepEqual(speciesEnrichmentAcceptanceSchema.parse(input), input);
+  });
+
+  test("rejects NUL in matching accepted and Management completion text", () => {
+    const input = acceptanceWithCompletions();
+    const value = "Use a gate\u0000 barrier.";
+    const result = speciesEnrichmentAcceptanceSchema.safeParse({
+      ...input,
+      accepted_entry: { ...input.accepted_entry, handling_guidance: value },
+      management_completions: {
+        ...input.management_completions,
+        handling_guidance: { value, justification: "Verified\u0000 on site." },
+      },
+    });
+
+    assert.equal(result.success, false);
+    assert.deepEqual(result.error.issues.map(({ path }) => path.join(".")).sort(), [
+      "accepted_entry.handling_guidance",
+      "management_completions.handling_guidance.justification",
+      "management_completions.handling_guidance.value",
+    ]);
+  });
+
+  test("rejects an unpaired surrogate in matching accepted and Management completion values", () => {
+    const input = acceptanceWithCompletions();
+    const value = "Use a gate\uD800 barrier.";
+    const result = speciesEnrichmentAcceptanceSchema.safeParse({
+      ...input,
+      accepted_entry: { ...input.accepted_entry, handling_guidance: value },
+      management_completions: {
+        ...input.management_completions,
+        handling_guidance: { value, justification: "Verified on site." },
+      },
+    });
+
+    assert.equal(result.success, false);
+    assert.deepEqual(result.error.issues.map(({ path }) => path.join(".")).sort(), [
+      "accepted_entry.handling_guidance",
+      "management_completions.handling_guidance.value",
+    ]);
+  });
+
+  test("rejects a remaining null, missing completion, mismatched value or missing justification", () => {
+    const input = acceptanceWithCompletions();
+    const { minimum_handlers, ...otherCompletions } = input.management_completions;
+    const samples = [
+      { ...input, accepted_entry: { ...input.accepted_entry, minimum_handlers: null } },
+      { ...input, management_completions: otherCompletions },
+      { ...input, management_completions: { ...otherCompletions, minimum_handlers: { ...minimum_handlers, value: 4 } } },
+      { ...input, management_completions: { ...otherCompletions, minimum_handlers: { value: 3 } } },
+      { ...input, management_completions: { ...otherCompletions, minimum_handlers: { ...minimum_handlers, justification: " \t " } } },
+    ];
+    for (const sample of samples) {
+      assert.equal(speciesEnrichmentAcceptanceSchema.safeParse(sample).success, false);
+    }
+  });
+
+  test("enforces text, handler count and safety class constraints on final and manual values", () => {
+    const input = acceptanceWithCompletions();
+    const invalidFields = [
+      ["display_name", " \n "],
+      ["handling_guidance", ""],
+      ["minimum_handlers", 0],
+      ["minimum_handlers", 1.5],
+      ["minimum_handlers", 32_768],
+      ["minimum_handlers", "3"],
+      ["safety_class", "severe"],
+    ] as const;
+    for (const [field, value] of invalidFields) {
+      assert.equal(speciesEnrichmentAcceptanceSchema.safeParse({
+        ...input,
+        accepted_entry: { ...input.accepted_entry, [field]: value },
+      }).success, false, field);
+      assert.equal(speciesEnrichmentAcceptanceSchema.safeParse({
+        ...input,
+        management_completions: {
+          ...input.management_completions,
+          [field]: { ...input.management_completions[field], value },
+        },
+      }).success, false, field);
+    }
+
+    for (const value of [1, 32_767]) {
+      assert.equal(speciesEnrichmentAcceptanceSchema.safeParse({
+        ...input,
+        accepted_entry: { ...input.accepted_entry, minimum_handlers: value },
+        management_completions: {
+          ...input.management_completions,
+          minimum_handlers: { ...input.management_completions.minimum_handlers, value },
+        },
+      }).success, true);
+    }
+  });
+
+  test("requires a canonical ID that matches across the API facts, retrieval and both entries", () => {
+    const input = acceptanceWithCompleteProposal();
+    const { proposal } = input;
+    const samples = [
+      { ...input, proposal: { ...proposal, api_facts: { ...proposal.api_facts, id: "another-species" } } },
+      { ...input, proposal: { ...proposal, retrieval: { ...proposal.retrieval, external_species_id: "another-species" } } },
+      { ...input, proposal: { ...proposal, proposed_entry: { ...proposal.proposed_entry, external_species_id: "another-species" } } },
+      { ...input, accepted_entry: { ...input.accepted_entry, external_species_id: "another-species" } },
+      { ...input, accepted_entry: { ...input.accepted_entry, external_species_id: " bramble-back " } },
+    ];
+    for (const sample of samples) {
+      assert.equal(speciesEnrichmentAcceptanceSchema.safeParse(sample).success, false);
+    }
+  });
+
+  test("rejects changes and Management completions for already supplied values", () => {
+    const input = acceptanceWithCompleteProposal();
+    const samples = [
+      { ...input, accepted_entry: { ...input.accepted_entry, display_name: "Another name" } },
+      { ...input, accepted_entry: { ...input.accepted_entry, minimum_handlers: 4 } },
+      { ...input, accepted_entry: { ...input.accepted_entry, safety_class: "high" } },
+      { ...input, accepted_entry: { ...input.accepted_entry, handling_guidance: "Use a gate barrier." } },
+      { ...input, management_completions: { minimum_handlers: { value: 2, justification: "Agreed." } } },
+    ];
+    for (const sample of samples) {
+      assert.equal(speciesEnrichmentAcceptanceSchema.safeParse(sample).success, false);
+    }
+  });
+
+  test("rejects missing keys and unexpected properties at every level of acceptance", () => {
+    const input = acceptanceWithCompletions();
+    const { proposal, accepted_entry, management_completions } = input;
+    const { display_name, ...incompleteEntry } = accepted_entry;
+    const samples = [
+      { accepted_entry, management_completions },
+      { proposal, management_completions },
+      { proposal, accepted_entry },
+      { ...input, accepted_entry: incompleteEntry },
+      { ...input, approved: true },
+      { ...input, proposal: { ...proposal, approved: true } },
+      { ...input, accepted_entry: { ...accepted_entry, updated_by: "manager" } },
+      { ...input, management_completions: { ...management_completions, external_species_id: display_name } },
+      { ...input, management_completions: {
+        ...management_completions,
+        display_name: { ...management_completions.display_name, source: "manager" },
+      } },
+    ];
+    for (const sample of samples) {
+      assert.equal(speciesEnrichmentAcceptanceSchema.safeParse(sample).success, false);
+    }
   });
 });
 

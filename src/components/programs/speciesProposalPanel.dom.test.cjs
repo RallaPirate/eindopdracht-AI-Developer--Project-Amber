@@ -78,7 +78,7 @@ function loadGraph(sandboxFetch, speciesRows, supabase) {
     }).outputText;
     const execute = vm.runInNewContext(
       `(function(require,module,exports,fetch){${compiled}\n})`,
-      { window, document, console, queueMicrotask, fetch: sandboxFetch },
+      { window, document, console, queueMicrotask, FormData: window.FormData, fetch: sandboxFetch },
       { filename: file },
     );
     execute((dependency) => load(dependency, file), loaded, loaded.exports, sandboxFetch);
@@ -213,6 +213,12 @@ const rexMatch = {
   scientific_name: "Tyrannosaurus rex",
 };
 
+const signedProposal = { version: 1, payload: "fixture_payload", signature: "ab".repeat(32) };
+
+function enrichmentResponse(proposal) {
+  return { ok: true, data: proposal, signed_proposal: signedProposal };
+}
+
 function enrichmentProposal(load, match = rexMatch) {
   const { assembleSpeciesEnrichmentProposal, SPECIES_ENRICHMENT_GENERATED_FIELDS } =
     load("@/lib/ai/speciesEnrichmentSchemas");
@@ -252,8 +258,8 @@ async function runDom(speciesRows, fn, supabase) {
   const fetches = [];
   const fetchImpl = (url, init) => {
     calls.push({ url: String(url), init });
-    return new Promise((resolve) => {
-      fetches.push(resolve);
+    return new Promise((resolve, reject) => {
+      fetches.push((response) => response instanceof Error ? reject(response) : resolve(response));
     });
   };
   const load = loadGraph(fetchImpl, speciesRows, supabase);
@@ -614,16 +620,13 @@ test("switching management accounts does not keep the previous selection", async
     });
     await confirmMatch(act, "abelisaurus");
     await waitFor(act, () => calls.length === 4);
-    await finishSearch(act, fetches, {
-      ok: true,
-      data: enrichmentProposal(load, {
+    await finishSearch(act, fetches, enrichmentResponse(enrichmentProposal(load, {
         external_species_id: "abelisaurus",
         scientific_name: "Abelisaurus comahuesis",
-      }),
-    });
+    })));
     await waitFor(act, () => text(document.body).includes("TEMPORARY — NOT APPROVED OR SAVED"));
     await act(async () => {
-      resolvePreviousEnrichment(jsonResponse({ ok: true, data: enrichmentProposal(load) }));
+      resolvePreviousEnrichment(jsonResponse(enrichmentResponse(enrichmentProposal(load))));
     });
     assert.match(text(document.body), /TEMPORARY — NOT APPROVED OR SAVED/);
     assert.match(text(document.body), /Abelisaurus comahuesis/);
@@ -883,11 +886,9 @@ test("confirmation generates once and malformed or mismatched proposals require 
     const proposal = enrichmentProposal(load);
     for (const [body, status] of [
       [{ ok: false, error: { code: "unauthorized", message: "provider detail" } }, 500],
-      [{ ok: true, data: { ...proposal, provenance: {} } }, 200],
-      [{
-        ok: true,
-        data: { ...proposal, api_facts: { ...proposal.api_facts, id: "abelisaurus" } },
-      }, 200],
+      [{ ok: true, data: proposal }, 200],
+      [enrichmentResponse({ ...proposal, provenance: {} }), 200],
+      [enrichmentResponse({ ...proposal, api_facts: { ...proposal.api_facts, id: "abelisaurus" } }), 200],
     ]) {
       const before = calls.length;
       await finishSearch(act, fetches, body, status);
@@ -904,11 +905,11 @@ test("confirmation generates once and malformed or mismatched proposals require 
       assert.equal(calls.at(-1).init.body, calls[1].init.body);
     }
 
-    await finishSearch(act, fetches, { ok: true, data: proposal });
+    await finishSearch(act, fetches, enrichmentResponse(proposal));
     await waitFor(act, () => text(document.body).includes("TEMPORARY — NOT APPROVED OR SAVED"));
     assert.equal(buttonByText("Retry generation"), null);
     assert.equal(buttonByText("Confirm species"), null);
-    assert.equal(calls.length, 5);
+    assert.equal(calls.length, 6);
   });
 });
 
@@ -926,7 +927,7 @@ test("search again discards an in-flight proposal and suppresses duplicate gener
     await act(async () => { document.querySelector("input[type='radio']").click(); });
     assert.equal(buttonByText("Confirm species").disabled, true);
     await act(async () => {
-      resolveEnrichment(jsonResponse({ ok: true, data: enrichmentProposal(load) }));
+      resolveEnrichment(jsonResponse(enrichmentResponse(enrichmentProposal(load))));
     });
     await waitFor(act, () => !buttonByText("Confirm species").disabled);
     assert.equal(calls.length, 3);
@@ -965,7 +966,7 @@ test("generation success is discarded if the fresh Management recheck finds a do
       });
       return qc.getVerifiedAuthSnapshot();
     };
-    await finishSearch(act, fetches, { ok: true, data: enrichmentProposal(load) });
+    await finishSearch(act, fetches, enrichmentResponse(enrichmentProposal(load)));
     await waitFor(act, () => buttonByText("New Species Proposal") === null);
     assert.doesNotMatch(text(document.body), /Selected species|TEMPORARY — NOT APPROVED OR SAVED/);
     await act(async () => {
@@ -996,7 +997,7 @@ test("the proposal tab shows lookup, generation, and review as separate stages",
     assert.ok(buttonByText("Search again"));
     assert.doesNotMatch(body(), /TEMPORARY — NOT APPROVED OR SAVED/);
 
-    await finishSearch(act, fetches, { ok: true, data: enrichmentProposal(load) });
+    await finishSearch(act, fetches, enrichmentResponse(enrichmentProposal(load)));
     await waitFor(act, () => body().includes("TEMPORARY — NOT APPROVED OR SAVED"));
     assert.equal((body().match(/TEMPORARY — NOT APPROVED OR SAVED/g) ?? []).length, 1);
     assert.equal(document.querySelector("input[name='species-name']"), null);
@@ -1021,5 +1022,185 @@ test("the proposal tab shows lookup, generation, and review as separate stages",
     await waitFor(act, () => document.querySelector("input[name='species-name']") !== null);
     assert.match(body(), /Which dinosaur would you like to add\?/);
     assert.doesNotMatch(body(), /TEMPORARY — NOT APPROVED OR SAVED|Generating species proposal/);
+  });
+});
+
+async function prepareAcceptance(h) {
+  const { act, calls, fetches, load } = h;
+  const confirm = await prepareEnrichment(h);
+  await act(async () => { confirm.click(); });
+  await waitFor(act, () => calls.length === 2);
+  const proposal = enrichmentProposal(load);
+  for (const [field, value] of Object.entries({
+    general_description: "The Agent description.",
+    diet_preferences: "Carnivore",
+    habitat_preferences: "Open terrain",
+  })) {
+    proposal.proposed_entry[field] = value;
+    proposal.provenance[field] = {
+      basis: "api_interpretation", supporting_fields: ["diet_profile"], uncertainty: null,
+    };
+  }
+  await finishSearch(act, fetches, enrichmentResponse(proposal));
+  await waitFor(act, () => buttonByText("Accept & Save Species") !== null);
+  return proposal;
+}
+
+const completedValues = {
+  handling_guidance: "Keep a secure barrier in place.",
+  minimum_handlers: 3,
+  safety_class: "high",
+};
+const justification = "Required by the Management handling review.";
+
+function fillCompletions() {
+  for (const [field, value] of Object.entries(completedValues)) {
+    document.querySelector(`[name='${field}-value']`).value = String(value);
+    document.querySelector(`[name='${field}-justification']`).value = justification;
+  }
+}
+
+async function submitAcceptance(h) {
+  await h.act(async () => { buttonByText("Accept & Save Species").click(); });
+  await waitFor(h.act, () => h.calls.at(-1)?.url === "/api/agent/species-enrichment/accept");
+}
+
+test("Management completes only null fields and a confirmed save refreshes the species list once", async () => {
+  const rows = [];
+  await runDom(rows, async (h) => {
+    const { act, calls, fetches } = h;
+    const proposal = await prepareAcceptance(h);
+    assert.match(text(document.body), /The Agent description\./);
+    assert.match(text(document.body), /Supporting API fields/);
+    assert.equal(document.querySelector("[name='general_description-value']"), null);
+    assert.equal(document.querySelector("[name='display_name-value']"), null);
+    assert.equal(document.querySelectorAll("[name$='-justification']").length, 3);
+    const accept = buttonByText("Accept & Save Species");
+    await act(async () => { accept.click(); });
+    assert.equal(calls.length, 2);
+    fillCompletions();
+    document.querySelector("[name='minimum_handlers-justification']").value = " ";
+    await act(async () => { accept.click(); });
+    assert.match(text(document.querySelector("[role='alert']")), /provide a justification/);
+    assert.equal(calls.length, 2);
+    fillCompletions();
+
+    await act(async () => { accept.click(); accept.click(); });
+    await waitFor(act, () => calls.length === 3 && buttonByText("Saving species…") !== null);
+    assert.equal(buttonByText("Saving species…").disabled, true);
+    assert.equal(buttonByText("Search again").disabled, true);
+    assert.doesNotMatch(text(document.body), /Species saved\./);
+    const submitted = calls[2];
+    assert.equal(submitted.url, "/api/agent/species-enrichment/accept");
+    assert.equal(submitted.init.credentials, "same-origin");
+    assert.deepEqual(JSON.parse(submitted.init.body), {
+      signed_proposal: signedProposal,
+      accepted_entry: { ...proposal.proposed_entry, ...completedValues },
+      management_completions: Object.fromEntries(Object.entries(completedValues).map(([field, value]) => [
+        field, { value, justification },
+      ])),
+    });
+
+    rows.push(localSpecies("a492ce32-054a-41b2-8c2b-97cc49b0b7e7", "Saved Tyrannosaurus"));
+    await finishSearch(act, fetches, { ok: true, data: { external_species_id: rexMatch.external_species_id } }, 201);
+    await waitFor(act, () => text(document.body).includes("Species saved.") && buttonByText("Saved Tyrannosaurus"));
+    assert.doesNotMatch(text(document.body), /TEMPORARY — NOT APPROVED OR SAVED/);
+    assert.equal(buttonByText("Accept & Save Species"), null);
+    assert.equal(calls.length, 3);
+  });
+});
+
+for (const { name, response, message, blocked } of [
+  {
+    name: "validation failure", response: () => jsonResponse({ ok: false, error: { message: "private details" } }, 400),
+    message: /Check the completions/, blocked: false,
+  },
+  {
+    name: "expired proposal", response: () => jsonResponse({
+      ok: false, error: { message: "The signed species proposal is invalid or expired." },
+    }, 400), message: /Search again to generate a new proposal/, blocked: true,
+  },
+  {
+    name: "duplicate species", response: () => jsonResponse({ ok: false }, 409),
+    message: /already exists/, blocked: true,
+  },
+  {
+    name: "network failure", response: () => new TypeError("private details"),
+    message: /save could not be confirmed/, blocked: true,
+  },
+  {
+    name: "database save failure without confirmed access loss",
+    response: () => jsonResponse({ ok: false, error: { code: "database" } }, 500),
+    message: /save could not be confirmed/, blocked: true,
+  },
+  {
+    name: "mismatched 201 response", response: () => jsonResponse({ ok: true, data: { external_species_id: "other" } }, 201),
+    message: /save could not be confirmed/, blocked: true,
+  },
+]) {
+  test(`${name} keeps the review without reporting success or retrying automatically`, async () => {
+    await runDom([], async (h) => {
+      await prepareAcceptance(h);
+      fillCompletions();
+      await submitAcceptance(h);
+      await h.act(async () => { h.fetches.shift()(response()); });
+      await waitFor(h.act, () => message.test(text(document.body)));
+      assert.equal(buttonByText("Accept & Save Species").disabled, blocked);
+      assert.match(text(document.body), /TEMPORARY — NOT APPROVED OR SAVED/);
+      for (const [field, value] of Object.entries(completedValues)) {
+        assert.equal(document.querySelector(`[name='${field}-value']`).value, String(value));
+        assert.equal(document.querySelector(`[name='${field}-justification']`).value, justification);
+      }
+      assert.doesNotMatch(text(document.body), /Species saved\.|private details|You do not have permission/);
+      assert.equal(h.calls.length, 3);
+    });
+  });
+}
+
+test("an acceptance access denial discards the envelope and all completions", async () => {
+  await runDom([], async (h) => {
+    await prepareAcceptance(h);
+    fillCompletions();
+    const auth = h.load("@/lib/authQueryIsolation");
+    let syncs = 0;
+    auth.requestAuthQuerySync = async () => { syncs += 1; };
+    await submitAcceptance(h);
+    await finishSearch(h.act, h.fetches, { ok: false }, 403);
+    await waitFor(h.act, () => text(document.body).includes("You do not have permission"));
+    assert.equal(syncs, 1);
+    assert.equal(buttonByText("Accept & Save Species"), null);
+    assert.equal(document.querySelector("[name='handling_guidance-value']"), null);
+    assert.doesNotMatch(text(document.body), /TEMPORARY — NOT APPROVED OR SAVED|Species saved\./);
+  });
+});
+
+test("a fresh role downgrade prevents the acceptance request from leaving the browser", async () => {
+  await runDom([], async (h) => {
+    await prepareAcceptance(h);
+    fillCompletions();
+    h.load("@/lib/authQueryIsolation").requestFreshAuthQuerySync = async () => {
+      grant(h.qc, "user-mgmt", "senior", "Ada");
+      return h.qc.getVerifiedAuthSnapshot();
+    };
+    await h.act(async () => { buttonByText("Accept & Save Species").click(); });
+    await waitFor(h.act, () => buttonByText("New Species Proposal") === null);
+    assert.equal(h.calls.length, 2);
+    assert.equal(document.querySelector("[name='handling_guidance-value']"), null);
+    assert.doesNotMatch(text(document.body), /Species saved\./);
+  });
+});
+
+test("a delayed acceptance cannot report success after Management access is lost", async () => {
+  await runDom([], async (h) => {
+    await prepareAcceptance(h);
+    fillCompletions();
+    await submitAcceptance(h);
+    await h.act(async () => { grant(h.qc, "user-mgmt", "employee", "Ada"); });
+    await waitFor(h.act, () => buttonByText("New Species Proposal") === null);
+    await finishSearch(h.act, h.fetches, { ok: true, data: { external_species_id: rexMatch.external_species_id } }, 201);
+    await h.act(async () => { grant(h.qc, "user-mgmt", "management", "Ada"); });
+    await openProposalTab(h.act);
+    assert.equal(buttonByText("Accept & Save Species"), null);
+    assert.doesNotMatch(text(document.body), /TEMPORARY — NOT APPROVED OR SAVED|Species saved\./);
   });
 });

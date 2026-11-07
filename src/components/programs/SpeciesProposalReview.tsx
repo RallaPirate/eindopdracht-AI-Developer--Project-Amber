@@ -1,8 +1,12 @@
-import type { ReactNode } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
+import { Win95Button } from "@/components/ui/Win95Button";
 import {
   EXTERNAL_SPECIES_FIELD_NAMES,
+  SAFETY_CLASSES,
   SPECIES_ENRICHMENT_GENERATED_FIELDS,
+  speciesEnrichmentAcceptanceSchema,
   type ExternalSpeciesFacts,
+  type SpeciesEnrichmentAcceptance,
   type SpeciesEnrichmentProposal,
 } from "@/lib/ai/speciesEnrichmentSchemas";
 
@@ -35,6 +39,9 @@ const BASIS_LABELS = {
   api_interpretation: "API interpretation",
   operational_recommendation: "Operational recommendation",
 } as const;
+
+const COMPLETABLE_FIELDS = ["display_name", ...SPECIES_ENRICHMENT_GENERATED_FIELDS] as const;
+type CompletableField = (typeof COMPLETABLE_FIELDS)[number];
 
 export const SPECIES_PROPOSAL_REVIEW_COPY = {
   temporary: "TEMPORARY — NOT APPROVED OR SAVED",
@@ -74,9 +81,11 @@ function speciesName(proposal: SpeciesEnrichmentProposal): string | null {
 export function SpeciesProposalReview({
   proposal,
   actions,
+  renderCompletion,
 }: {
   proposal: SpeciesEnrichmentProposal;
   actions?: ReactNode;
+  renderCompletion?: (field: CompletableField, label: string) => ReactNode;
 }) {
   const name = speciesName(proposal);
 
@@ -123,6 +132,9 @@ export function SpeciesProposalReview({
           ))}
         </ReviewColumn>
         <ReviewColumn title={SPECIES_PROPOSAL_REVIEW_COPY.proposal}>
+          {proposal.proposed_entry.display_name === null
+            ? renderCompletion?.("display_name", SPECIES_PROPOSAL_REVIEW_COPY.speciesName)
+            : null}
           {SPECIES_ENRICHMENT_GENERATED_FIELDS.map((field) => {
             const provenance = proposal.provenance[field];
             const value = proposal.proposed_entry[field];
@@ -158,12 +170,111 @@ export function SpeciesProposalReview({
                     {provenance.uncertainty ?? SPECIES_PROPOSAL_REVIEW_COPY.none}
                   </span>
                 </p>
+                {value === null ? renderCompletion?.(field, GENERATED_FIELD_LABELS[field]) : null}
               </FieldBlock>
             );
           })}
         </ReviewColumn>
       </div>
     </div>
+  );
+}
+
+export function SpeciesProposalAcceptance({
+  proposal,
+  actions,
+  pending,
+  blocked,
+  error,
+  onAccept,
+}: {
+  proposal: SpeciesEnrichmentProposal;
+  actions: ReactNode;
+  pending: boolean;
+  blocked: boolean;
+  error: string | null;
+  onAccept: (acceptance: SpeciesEnrichmentAcceptance) => void;
+}) {
+  const [invalid, setInvalid] = useState(false);
+  const disabled = pending || blocked;
+
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (disabled) return;
+
+    const inputs = new FormData(event.currentTarget);
+    const acceptedEntry = { ...proposal.proposed_entry };
+    const completions = Object.fromEntries(COMPLETABLE_FIELDS
+      .filter((field) => proposal.proposed_entry[field] === null)
+      .map((field) => {
+        const text = String(inputs.get(`${field}-value`) ?? "").trim();
+        const value = field === "minimum_handlers" ? Number(text) : text;
+        const justification = String(inputs.get(`${field}-justification`) ?? "").trim();
+        Object.assign(acceptedEntry, { [field]: value });
+        return [field, { value, justification }];
+      }));
+    const parsed = speciesEnrichmentAcceptanceSchema.safeParse({
+      proposal,
+      accepted_entry: acceptedEntry,
+      management_completions: completions,
+    });
+    setInvalid(!parsed.success);
+    if (parsed.success) onAccept(parsed.data);
+  }
+
+  return (
+    <form className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden" onSubmit={onSubmit}>
+      <SpeciesProposalReview
+        proposal={proposal}
+        actions={actions}
+        renderCompletion={(field, label) => (
+          <CompletionInputs field={field} label={label} disabled={disabled} />
+        )}
+      />
+      <div className="shrink-0">
+        {invalid || error ? (
+          <p role="alert">{invalid ? "Complete each unresolved field and provide a justification." : error}</p>
+        ) : null}
+        <Win95Button type="submit" disabled={disabled}>
+          {pending ? "Saving species…" : "Accept & Save Species"}
+        </Win95Button>
+      </div>
+    </form>
+  );
+}
+
+function CompletionInputs({ field, label, disabled }: {
+  field: CompletableField;
+  label: string;
+  disabled: boolean;
+}) {
+  const control = {
+    name: `${field}-value`,
+    required: true,
+    className: "os-bevel-in block w-full bg-[var(--os-input-bg)] px-2 py-1 text-black",
+  };
+
+  return (
+    <fieldset disabled={disabled} className="mt-1 mb-2 min-w-0 border border-current p-2">
+      <legend className="px-1">Management completion</legend>
+      <label className="block">
+        {label}
+        {field === "safety_class" ? (
+          <select {...control} defaultValue="">
+            <option value="" disabled>Select a safety class</option>
+            {SAFETY_CLASSES.map((value) => <option key={value} value={value}>{value}</option>)}
+          </select>
+        ) : field === "minimum_handlers" ? (
+          <input {...control} type="number" min={1} max={32_767} step={1} />
+        ) : (
+          <textarea {...control} rows={2} />
+        )}
+      </label>
+      <label className="mt-1 block">
+        Justification for {label}
+        <textarea {...control} name={`${field}-justification`} rows={2} />
+      </label>
+    </fieldset>
   );
 }
 

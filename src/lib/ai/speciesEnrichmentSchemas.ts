@@ -198,6 +198,16 @@ export type SpeciesEnrichmentModelOutput = z.infer<
 
 const storedTextSchema = z.string().trim().min(1);
 const storedUncertaintySchema = storedTextSchema.nullable();
+const nonBlankTextSchema = z
+  .string()
+  .refine((value) => value.trim().length > 0)
+  .refine((value) => !value.includes("\u0000"), "Text must not contain a NUL character.");
+const persistableSpeciesTextSchema = nonBlankTextSchema.refine(
+  // Unicode mode matches surrogate code points only when they are unpaired.
+  (value) => !/[\uD800-\uDFFF]/u.test(value),
+  "Text must not contain unpaired UTF-16 surrogates.",
+);
+const proposedSpeciesTextSchema = storedTextSchema.pipe(persistableSpeciesTextSchema).nullable();
 
 const storedFieldProvenanceSchema = z.strictObject({
   basis: enrichmentBasisSchema,
@@ -216,11 +226,11 @@ const storedProvenanceShape = {
 
 const proposedSpeciesEntrySchema = z.strictObject({
   external_species_id: canonicalSpeciesIdSchema,
-  display_name: storedTextSchema.nullable(),
-  general_description: storedTextSchema.nullable(),
-  diet_preferences: storedTextSchema.nullable(),
-  habitat_preferences: storedTextSchema.nullable(),
-  handling_guidance: storedTextSchema.nullable(),
+  display_name: proposedSpeciesTextSchema,
+  general_description: proposedSpeciesTextSchema,
+  diet_preferences: proposedSpeciesTextSchema,
+  habitat_preferences: proposedSpeciesTextSchema,
+  handling_guidance: proposedSpeciesTextSchema,
   minimum_handlers: minimumHandlersSchema.nullable(),
   safety_class: safetyClassSchema.nullable(),
 });
@@ -246,6 +256,100 @@ export const speciesEnrichmentProposalSchema = z.strictObject({
 export type SpeciesEnrichmentProposal = z.infer<
   typeof speciesEnrichmentProposalSchema
 >;
+
+const completableSpeciesFields = {
+  display_name: persistableSpeciesTextSchema,
+  general_description: persistableSpeciesTextSchema,
+  diet_preferences: persistableSpeciesTextSchema,
+  habitat_preferences: persistableSpeciesTextSchema,
+  handling_guidance: persistableSpeciesTextSchema,
+  minimum_handlers: minimumHandlersSchema,
+  safety_class: safetyClassSchema,
+};
+
+const acceptedSpeciesEntrySchema = z.strictObject({
+  external_species_id: canonicalSpeciesIdSchema,
+  ...completableSpeciesFields,
+});
+
+function managementCompletionSchema<T extends z.ZodType>(value: T) {
+  return z.strictObject({ value, justification: nonBlankTextSchema });
+}
+
+const managementCompletionsSchema = z.strictObject({
+  display_name: managementCompletionSchema(completableSpeciesFields.display_name),
+  general_description: managementCompletionSchema(completableSpeciesFields.general_description),
+  diet_preferences: managementCompletionSchema(completableSpeciesFields.diet_preferences),
+  habitat_preferences: managementCompletionSchema(completableSpeciesFields.habitat_preferences),
+  handling_guidance: managementCompletionSchema(completableSpeciesFields.handling_guidance),
+  minimum_handlers: managementCompletionSchema(completableSpeciesFields.minimum_handlers),
+  safety_class: managementCompletionSchema(completableSpeciesFields.safety_class),
+}).partial();
+
+/** Checks acceptance against the original assembled proposal supplied to this contract. */
+export const speciesEnrichmentAcceptanceSchema = z.strictObject({
+  proposal: speciesEnrichmentProposalSchema,
+  accepted_entry: acceptedSpeciesEntrySchema,
+  management_completions: managementCompletionsSchema,
+}).superRefine(({ proposal, accepted_entry, management_completions }, ctx) => {
+  const { api_facts, retrieval, proposed_entry, provenance } = proposal;
+  const { external_species_id, display_name, ...generatedFields } = proposed_entry;
+  const id = api_facts.id;
+  if (
+    retrieval.external_species_id !== id ||
+    external_species_id !== id ||
+    accepted_entry.external_species_id !== id
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["accepted_entry", "external_species_id"],
+      message: "All species identifiers must match the API record.",
+    });
+  }
+
+  if (
+    display_name !== deriveDisplayName(api_facts.scientific_name) ||
+    !validateSpeciesEnrichmentModelProposal({ ...generatedFields, provenance }).ok
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["proposal"],
+      message: "Expected an assembled enrichment proposal.",
+    });
+  }
+
+  for (const field of ["display_name", ...SPECIES_ENRICHMENT_GENERATED_FIELDS] as const) {
+    const original = proposed_entry[field];
+    const completion = management_completions[field];
+    if (original === null) {
+      if (!completion || completion.value !== accepted_entry[field]) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["management_completions", field],
+          message: "An unresolved field requires a completion matching the accepted value.",
+        });
+      }
+      continue;
+    }
+
+    if (Object.hasOwn(management_completions, field)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["management_completions", field],
+        message: "Only unresolved fields may receive Management completions.",
+      });
+    }
+    if (accepted_entry[field] !== original) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["accepted_entry", field],
+        message: "The accepted value must match the original proposal.",
+      });
+    }
+  }
+});
+
+export type SpeciesEnrichmentAcceptance = z.infer<typeof speciesEnrichmentAcceptanceSchema>;
 
 const GENERATED_TEXT_FIELDS = [
   "general_description",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { describe, test } from "node:test";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { afterEach, beforeEach, describe, test } from "node:test";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import {
   SAFE_ERROR_MESSAGES,
@@ -10,16 +10,45 @@ import {
 import type { CurrentProfileResult } from "../currentProfile.ts";
 import type { ApplicationRole } from "../../types/database.ts";
 import {
+  SPECIES_ACCEPTANCE_MAX_BODY_BYTES,
   SPECIES_ENRICHMENT_MAX_BODY_BYTES,
   SPECIES_ENRICHMENT_REQUEST_MESSAGES,
+  handleSpeciesAcceptancePost as handleAcceptancePost,
   handleSpeciesEnrichmentPost,
   type SpeciesEnrichmentEndpointDependencies,
 } from "./speciesEnrichmentEndpoint.ts";
 import type { SpeciesEnrichmentProposal } from "./speciesEnrichmentSchemas.ts";
+import {
+  signSpeciesEnrichmentProposal,
+  verifySpeciesEnrichmentProposal,
+  type SignedSpeciesEnrichmentProposal,
+} from "./speciesEnrichmentSigning.ts";
+import { mintSpeciesInsertProof, SPECIES_INSERT_PROOF_HEADER } from "./speciesInsertProof.ts";
 
 const ENDPOINT = "https://amber.test/api/agent/species-enrichment";
+const ACCEPT_ENDPOINT = `${ENDPOINT}/accept`;
 const SECRET = "sk-test-secret";
 const PROVIDER_URL = "https://api.openai.com/v1/responses";
+const PROFILE_ID = "a492ce32-054a-41b2-8c2b-97cc49b0b7e7";
+const OTHER_PROFILE_ID = "4e786f4f-978f-4b7e-98c6-2a6103bd6452";
+const PROPOSAL_KEY = "SPECIES_ENRICHMENT_SIGNING_SECRET";
+const INSERT_KEY = "SPECIES_INSERT_PROOF_SECRET";
+const keyFixtures = { [PROPOSAL_KEY]: "1a".repeat(32), [INSERT_KEY]: "2b".repeat(32) };
+const previousKeys = Object.keys(keyFixtures).map((name) => [name, process.env[name]] as const);
+
+beforeEach(() => Object.assign(process.env, keyFixtures));
+afterEach(() => {
+  for (const [name, value] of previousKeys) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
+
+const factProvenance = {
+  basis: "api_interpretation" as const,
+  supporting_fields: ["scientific_name" as const],
+  uncertainty: null,
+};
 
 const proposal = {
   retrieval: {
@@ -31,26 +60,47 @@ const proposal = {
   api_facts: {
     id: "abelisaurus",
     scientific_name: "Abelisaurus comahuensis",
+    diet_profile: "Carnivore",
+    geological_period: null,
+    region: "South America",
+    social_requirements: "Unknown",
     general_care_recommendations: "Untrusted reference text.",
+    hybrid: false,
+    franchise_origins: [],
+    franchise_appearances: [],
   },
   proposed_entry: {
     external_species_id: "abelisaurus",
     display_name: "Abelisaurus comahuensis",
     general_description: "Temporary description.",
+    diet_preferences: "Temporary diet proposal.",
+    habitat_preferences: "Temporary habitat proposal.",
     handling_guidance: "Temporary handling proposal.",
+    minimum_handlers: null,
     safety_class: "moderate",
   },
   provenance: {
-    general_description: { basis: "api_interpretation" },
-    handling_guidance: { basis: "operational_recommendation" },
-    marker: "do-not-reassemble",
+    general_description: factProvenance,
+    diet_preferences: { ...factProvenance, supporting_fields: ["diet_profile"] },
+    habitat_preferences: { ...factProvenance, supporting_fields: ["region"] },
+    handling_guidance: {
+      basis: "operational_recommendation",
+      supporting_fields: ["general_care_recommendations"],
+      uncertainty: null,
+    },
+    minimum_handlers: {
+      basis: "operational_recommendation",
+      supporting_fields: [],
+      uncertainty: "Handler count requires review.",
+    },
+    safety_class: { ...factProvenance, basis: "operational_recommendation" },
   },
-} as unknown as SpeciesEnrichmentProposal;
+} satisfies SpeciesEnrichmentProposal;
 
 function profile(
   status: "ok",
   role: ApplicationRole,
-): CurrentProfileResult;
+): Extract<CurrentProfileResult, { status: "ok" }>;
 function profile(
   status: "unauthenticated" | "unlinked" | "error",
 ): CurrentProfileResult;
@@ -63,7 +113,7 @@ function profile(
       status: "ok",
       supabase: {} as SupabaseClient,
       authUserId: "auth-user-1",
-      profileId: "profile-1",
+      profileId: PROFILE_ID,
       role: role ?? "management",
     };
   }
@@ -117,16 +167,15 @@ function requestFor(
   });
 }
 
-async function readBody(response: Response): Promise<{
+type EnrichmentBody = {
   ok?: boolean;
   data?: SpeciesEnrichmentProposal;
+  signed_proposal?: SignedSpeciesEnrichmentProposal;
   error?: { code?: string; message?: string };
-}> {
-  return response.json() as Promise<{
-    ok?: boolean;
-    data?: SpeciesEnrichmentProposal;
-    error?: { code?: string; message?: string };
-  }>;
+};
+
+async function readBody(response: Response): Promise<EnrichmentBody> {
+  return response.json() as Promise<EnrichmentBody>;
 }
 
 describe("species enrichment endpoint authorisation", () => {
@@ -157,6 +206,8 @@ describe("species enrichment endpoint authorisation", () => {
     assert.equal(response.headers.get("access-control-allow-origin"), null);
     assert.equal(body.ok, true);
     assert.deepEqual(body.data, proposal);
+    assert.deepEqual(verifySpeciesEnrichmentProposal(body.signed_proposal, PROFILE_ID), ok(proposal));
+    assert.equal(JSON.stringify(body).includes(keyFixtures[PROPOSAL_KEY]), false);
     assert.deepEqual(deps.enrichmentCalls, [
       { external_species_id: "abelisaurus" },
     ]);
@@ -526,5 +577,241 @@ describe("species enrichment endpoint agent failures", () => {
     assert.equal(serialised.includes(SECRET), false);
     assert.equal(serialised.includes("generation failed"), false);
     assert.equal(response.headers.get("cache-control"), "no-store");
+  });
+});
+
+const acceptedEntry = {
+  ...proposal.proposed_entry,
+  minimum_handlers: 2,
+};
+
+function acceptanceBody() {
+  const signed = signSpeciesEnrichmentProposal(proposal, PROFILE_ID);
+  assert.equal(signed.ok, true);
+  return {
+    signed_proposal: signed.data,
+    accepted_entry: acceptedEntry,
+    management_completions: {
+      minimum_handlers: { value: 2, justification: "Management requires two handlers." },
+    },
+  };
+}
+
+function acceptanceRequest(body: unknown, headers: Record<string, string> = {}) {
+  return requestFor(JSON.stringify(body), headers, ACCEPT_ENDPOINT);
+}
+
+function handleSpeciesAcceptancePost(
+  request: Request,
+  getCurrentProfile: Parameters<typeof handleAcceptancePost>[1],
+  recheckLinkedProfile: Parameters<typeof handleAcceptancePost>[2] = async () => {
+    assert.fail("Unexpected profile recheck");
+  },
+) {
+  return handleAcceptancePost(request, getCurrentProfile, recheckLinkedProfile);
+}
+
+function acceptanceClient(reply = () => new Response(null, { status: 201 })) {
+  const requests: Request[] = [];
+  const supabase = createClient("https://database.invalid", "sb_publishable_fixture", {
+    accessToken: async () => "test-caller-token",
+    global: {
+      fetch: async (url, init) => {
+        requests.push(new Request(url, init));
+        return reply();
+      },
+    },
+  });
+  return {
+    requests,
+    getCurrentProfile: async () => ({ ...profile("ok", "management"), supabase }),
+  };
+}
+
+describe("species acceptance endpoint", () => {
+  test("accepts the enrichment envelope and sends one caller-scoped insert with a new proof", async ({ mock }) => {
+    mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-06T12:00:00Z") });
+    const enriched = await handleSpeciesEnrichmentPost(requestFor(undefined), dependencies({}));
+    assert.equal(enriched.status, 200);
+    const enrichment = await readBody(enriched);
+    const client = acceptanceClient();
+    const body = { ...acceptanceBody(), signed_proposal: enrichment.signed_proposal };
+    const browserProof = "untrusted-browser-proof";
+
+    const response = await handleSpeciesAcceptancePost(
+      acceptanceRequest(body, { [SPECIES_INSERT_PROOF_HEADER]: browserProof }),
+      client.getCurrentProfile,
+    );
+    assert.equal(response.status, 201);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get(SPECIES_INSERT_PROOF_HEADER), null);
+    assert.deepEqual(await response.json(), { ok: true, data: { external_species_id: "abelisaurus" } });
+
+    assert.equal(client.requests.length, 1);
+    const [insert] = client.requests;
+    assert.equal(insert.method, "POST");
+    assert.equal(insert.url, "https://database.invalid/rest/v1/species_database");
+    assert.equal(insert.headers.get("authorization"), "Bearer test-caller-token");
+    assert.doesNotMatch(insert.headers.get("prefer") ?? "", /resolution=/);
+    assert.deepEqual(await insert.json(), acceptedEntry);
+    const proof = mintSpeciesInsertProof(PROFILE_ID, acceptedEntry);
+    assert.equal(proof.ok, true);
+    assert.equal(insert.headers.get(SPECIES_INSERT_PROOF_HEADER), proof.data);
+    assert.notEqual(insert.headers.get(SPECIES_INSERT_PROOF_HEADER), browserProof);
+  });
+
+  test("rechecks authentication, profile linkage and Management role", async () => {
+    const client = acceptanceClient();
+    const management = await client.getCurrentProfile();
+    const cases = [
+      [profile("unauthenticated"), 401],
+      [profile("unlinked"), 403],
+      [{ ...management, role: "employee" }, 403],
+      [{ ...management, role: "senior" }, 403],
+      [profile("error"), 500],
+    ] as const;
+
+    for (const [caller, status] of cases) {
+      const response = await handleSpeciesAcceptancePost(
+        acceptanceRequest(acceptanceBody()), async () => caller,
+      );
+      assert.equal(response.status, status);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal((await response.text()).includes(SECRET), false);
+    }
+    assert.deepEqual(client.requests, []);
+  });
+
+  test("rejects forged, expired and cross-profile envelopes before any insert", async ({ mock }) => {
+    const client = acceptanceClient();
+    const issuedAt = Date.parse("2026-11-06T12:00:00Z");
+    mock.timers.enable({ apis: ["Date"], now: issuedAt });
+    const body = acceptanceBody();
+    const { signed_proposal: envelope } = body;
+    const forged = { ...envelope, payload: `${envelope.payload}A` };
+
+    const forgedResponse = await handleSpeciesAcceptancePost(
+      acceptanceRequest({ ...body, signed_proposal: forged }), client.getCurrentProfile,
+    );
+    assert.equal(forgedResponse.status, 400);
+
+    const crossProfileResponse = await handleSpeciesAcceptancePost(acceptanceRequest(body), async () => ({
+      ...await client.getCurrentProfile(), profileId: OTHER_PROFILE_ID,
+    }));
+    assert.equal(crossProfileResponse.status, 400);
+
+    mock.timers.setTime(issuedAt + 30 * 60 * 1000);
+    const expired = await handleSpeciesAcceptancePost(acceptanceRequest(body), client.getCurrentProfile);
+    assert.equal(expired.status, 400);
+    assert.deepEqual(client.requests, []);
+  });
+
+  test("rejects invalid completions, altered accepted values and unsigned request fields", async () => {
+    const client = acceptanceClient();
+    const body = acceptanceBody();
+    // A missing signing key would return 500 if the endpoint reached proof minting.
+    delete process.env[INSERT_KEY];
+    for (const invalid of [
+      { ...body, management_completions: {} },
+      { ...body, management_completions: { minimum_handlers: { value: 2, justification: " " } } },
+      { ...body, accepted_entry: { ...acceptedEntry, display_name: "Client override" } },
+      { ...body, accepted_entry: { ...acceptedEntry, updated_by: PROFILE_ID } },
+      { ...body, proposal },
+      { ...body, insert_proof: "untrusted" },
+    ]) {
+      const response = await handleSpeciesAcceptancePost(acceptanceRequest(invalid), client.getCurrentProfile);
+      assert.equal(response.status, 400);
+    }
+    assert.deepEqual(client.requests, []);
+  });
+
+  test("fails closed when proposal signing or insert proof configuration is missing", async () => {
+    const client = acceptanceClient();
+    const body = acceptanceBody();
+    for (const key of [PROPOSAL_KEY, INSERT_KEY] as const) {
+      delete process.env[key];
+      const response = await handleSpeciesAcceptancePost(acceptanceRequest(body), client.getCurrentProfile);
+      assert.equal(response.status, 500);
+      assert.deepEqual((await readBody(response)).error, {
+        code: "unexpected", message: SAFE_ERROR_MESSAGES.unexpected,
+      });
+      process.env[key] = keyFixtures[key];
+    }
+    delete process.env[PROPOSAL_KEY];
+    const enrichment = await handleSpeciesEnrichmentPost(requestFor(undefined), dependencies({}));
+    assert.equal(enrichment.status, 500);
+    assert.deepEqual(await enrichment.json(), {
+      ok: false, error: { code: "unexpected", message: SAFE_ERROR_MESSAGES.unexpected },
+    });
+    assert.deepEqual(client.requests, []);
+  });
+
+  test("maps duplicate conflicts and database failures without returning raw details", async () => {
+    for (const [code, dbStatus, status, appCode] of [
+      ["23505", 409, 409, "conflict"],
+      ["XX000", 500, 500, "database"],
+    ] as const) {
+      const client = acceptanceClient(() => Response.json({
+        code, message: SECRET, details: "private database details",
+      }, { status: dbStatus }));
+      const response = await handleSpeciesAcceptancePost(acceptanceRequest(acceptanceBody()), client.getCurrentProfile);
+      assert.equal(response.status, status);
+      assert.equal(client.requests.length, 1);
+      assert.deepEqual(await response.json(), {
+        ok: false, error: { code: appCode, message: SAFE_ERROR_MESSAGES[appCode] },
+      });
+    }
+  });
+
+  test("rechecks the caller's linked profile after an INSERT denial", async ({ mock }) => {
+    const client = acceptanceClient(() => Response.json({ code: "42501", message: SECRET }, { status: 403 }));
+    const management = await client.getCurrentProfile();
+    const cases = [
+      { name: "Management access intact", current: management, status: 500, code: "database" },
+      { name: "downgraded to Senior", current: { ...management, role: "senior" }, status: 403, code: "unauthorized" },
+      { name: "unlinked", current: profile("unlinked"), status: 403, code: "unauthorized" },
+      { name: "linked profile changed", current: { ...management, profileId: OTHER_PROFILE_ID }, status: 403, code: "unauthorized" },
+      { name: "inconclusive recheck", current: profile("error"), status: 500, code: "database" },
+      { name: "recheck threw", current: null, status: 500, code: "database" },
+    ] as const;
+
+    for (const { name, current, status, code } of cases) {
+      client.requests.length = 0;
+      const recheck = mock.fn<Parameters<typeof handleAcceptancePost>[2]>(async () => {
+        if (!current) throw new Error(SECRET);
+        return current;
+      });
+      const response = await handleSpeciesAcceptancePost(
+        acceptanceRequest(acceptanceBody()), client.getCurrentProfile, recheck,
+      );
+      assert.equal(response.status, status, name);
+      assert.equal(response.headers.get("cache-control"), "no-store", name);
+      assert.deepEqual(await response.json(), {
+        ok: false, error: { code, message: SAFE_ERROR_MESSAGES[code] },
+      }, name);
+      assert.equal(client.requests.length, 1, name);
+      assert.equal(recheck.mock.callCount(), 1, name);
+      const [identity] = recheck.mock.calls[0].arguments;
+      assert.equal(identity.supabase, management.supabase, name);
+      assert.equal(identity.userId, management.authUserId, name);
+    }
+  });
+
+  test("enforces the acceptance JSON size and origin limits", async () => {
+    const client = acceptanceClient();
+    const body = acceptanceBody();
+    const requests = [
+      [acceptanceRequest(body, { origin: "https://foreign.test" }), 403],
+      [acceptanceRequest(body, { "content-type": "text/plain" }), 400],
+      [acceptanceRequest(body, { "content-length": String(SPECIES_ACCEPTANCE_MAX_BODY_BYTES + 1) }), 400],
+      [requestFor(" ".repeat(SPECIES_ACCEPTANCE_MAX_BODY_BYTES + 1), {}, ACCEPT_ENDPOINT), 400],
+      [requestFor("{", {}, ACCEPT_ENDPOINT), 400],
+    ] as const;
+    for (const [request, status] of requests) {
+      const response = await handleSpeciesAcceptancePost(request, client.getCurrentProfile);
+      assert.equal(response.status, status);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+    }
+    assert.deepEqual(client.requests, []);
   });
 });
