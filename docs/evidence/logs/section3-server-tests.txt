@@ -1,0 +1,74 @@
+**terminal output captured manually**
+
+
+(node:8424) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/tante/web/project-amber/src/lib/ai/speciesEnrichmentFlow.test.ts is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\tante\web\project-amber\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ species enrichment limits
+  ✔ uses the bounded execution settings (3.3191ms)
+✔ species enrichment limits (5.0484ms)
+▶ species enrichment request failures
+  ✔ rejects an invalid identifier before retrieval or generation (3.3164ms)
+  ✔ reports a missing model without reading a credential (0.7242ms)
+✔ species enrichment request failures (4.4478ms)
+▶ species enrichment retrieval
+  ✔ retrieves through the tool and assembles server-owned facts (67.9233ms)
+  ✔ calls getExternalSpecies for the selected id only (8.0111ms)
+  ✔ rejects a mismatched identifier without a second retrieval (3.0257ms)
+  ✔ rejects a repeated retrieval in the same step (2.7164ms)
+  ✔ does not accept a proposal when the required tool is not called (3.4469ms)
+  ✔ does not accept another tool (1.7965ms)
+  ✔ discards a later proposal when the tool arguments are invalid (3.3793ms)
+  ✔ returns the retrieval failure and does not invent a proposal (2.1934ms)
+  ✔ rejects oversized source text instead of truncating it (2.0204ms)
+✔ species enrichment retrieval (95.3187ms)
+▶ species enrichment proposal boundaries
+  ✔ leaves handlers and safety null when the text does not state them (2.5302ms)       
+  ✔ rejects a handler count inferred from an unrelated attribute (2.2188ms)
+  ✔ does not treat a field citation as proof of an explicit statement elsewhere (2.0533ms)
+  ✔ keeps an explicit handler count and safety class labelled as proposals (2.2144ms)  
+  ✔ rejects operational text presented as an API fact (1.7259ms)
+  ✔ ignores instructions embedded in the care text (3.8239ms)
+  ✔ does not accept a proposal that obeys embedded instructions (2.2309ms)
+  ✔ rejects a safety class the source negates or leaves unassessed (1.5184ms)
+  ✔ accepts a singular handler count stated in the source (2.0774ms)
+  ✔ accepts the existing plural handler wording (1.8315ms)
+  ✔ accepts a clearly affirmative safety classification (1.7412ms)
+  ✔ rejects blank generated text that the output schema still accepts (1.4091ms)       
+✔ species enrichment proposal boundaries (26.1089ms)
+▶ species enrichment execution failures
+  ✔ stops at the step ceiling without a proposal (1.4661ms)
+  ✔ does not keep calling tools after the retrieval step (2.0093ms)
+  ✔ times out without exposing the provider error (49.7168ms)
+  ✔ hides a retryable provider failure and does not retry it (3.3324ms)
+✔ species enrichment execution failures (57.0863ms)
+(node:30640) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/tante/web/project-amber/src/lib/ai/speciesEnrichmentSigning.test.ts is not specified andit doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\tante\web\project-amber\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ round-trips the complete temporary proposal for its Management profile (16.51ms)     
+✔ rejects NUL and unpaired surrogates in proposed database text before signing (2.7208ms)
+✔ preserves valid Unicode in signed database text (1.1599ms)
+✔ rejects altered proposal data, claims and signatures (1.2391ms)
+✔ rejects the envelope at expiry (3.256ms)
+✔ rejects a different profile and unsupported envelope versions (3.4555ms)
+✔ verifies exact signed bytes and rejects a different signing purpose (0.9989ms)       
+✔ rejects signed malformed bytes and invalid decoded proposals (0.8013ms)
+✔ fails closed when the signing secret is missing or malformed (0.4758ms)
+(node:7276) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/tante/web/project-amber/src/lib/ai/speciesInsertProof.test.ts is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\tante\web\project-amber\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ fails closed for missing or malformed signing configuration (1.453ms)
+✔ Supabase sends the proof on one insert alongside the caller's bearer token (38.5538ms)
+﹣ PostgreSQL verifies JS proofs, expiry bounds, role, audit and uniqueness (0.1449ms)# SKIP
+ℹ tests 61
+ℹ suites 9
+ℹ pass 60
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 965.7251
+0
