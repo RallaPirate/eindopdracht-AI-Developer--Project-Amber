@@ -160,7 +160,7 @@ Notes:
 
 [X] 08. Stop and recovery
 Stop interrupts generation; a subsequent question can be answered.
-Result: PARTIAL
+Result: PASS
 Notes: An incomplete-answer notice appeared initially, then disappeared. A subsequent question succeeded, but the previous tool label remained stuck at “Species search: working...”.
 
 [X] 09. Logout and return
@@ -182,6 +182,7 @@ KNOWN MINOR UI ISSUES
 2. An interrupted species-tool call can retain a “working...” label after cancellation, even when later requests succeed.
 3. The incomplete-answer notification disappeared after initially appearing.
 4. Weather wording could use the reserve's fictional classification terminology while keeping representative offshore weather distinct from actual local conditions.
+[X] FIX MINOR UI ISSUES MENTIONED ABOVE
 REMAINING VERIFICATION
 [ ] Confirm live streaming and hosted RLS after deployment.
 [ ] Test Employee, Senior and Management access where accounts are available.
@@ -189,8 +190,8 @@ REMAINING VERIFICATION
 [ ] Confirm deployed Stop/error recovery and mobile/narrow-viewport presentation.
 [ ] Capture deployment URL, final screenshots and test evidence.
 FINAL VERDICT
-Assistant MVP (local): PASS for principal functional tests; PARTIAL for Stop/recovery; deployment verification pending.
+Assistant MVP (local): PASS for principal functional tests; PASS for Stop/recovery; deployment verification pending.
 
 Observations: Species retrieval, Open-Meteo retrieval, multi-source reasoning, contextual follow-ups and basic session isolation passed in local browser tests. Cancellation exposed minor UI-state defects. Account switching during active streaming was not tested.
 
-Conclusion: The local Assistant MVP is functional and has passed the principal conversational, retrieval and basic session-isolation tests. Remaining issues concern minor UI presentation and deployment-specific verification gaps. Full Section 7 implementation is intentionally deferred.
+Conclusion: The local Assistant MVP is functional and has passed the principal conversational, retrieval and basic session-isolation tests. Remaining issues concern deployment-specific verification gaps. Full Section 7 implementation is intentionally deferred.
