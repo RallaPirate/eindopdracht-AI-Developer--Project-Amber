@@ -16,6 +16,13 @@ type DesktopProps = {
   onMoveWindow: (id: ProgramId, x: number, y: number) => void;
 };
 
+const REPORTS_WINDOW_FRAME = {
+  width: 800,
+  height: 560,
+  maxWidth: "calc(100% - 16px)",
+  maxHeight: "calc(100% - 16px)",
+};
+
 const SPECIES_WINDOW_FRAME = {
   width: 800,
   height: 520,
@@ -83,11 +90,13 @@ export function Desktop({
       {windows.map((win) => {
         const program = getProgram(win.id);
         const frame =
-          win.id === "species-database"
-            ? SPECIES_WINDOW_FRAME
-            : win.id === "assistant"
-              ? ASSISTANT_WINDOW_FRAME
-              : {};
+          win.id === "reports"
+            ? REPORTS_WINDOW_FRAME
+            : win.id === "species-database"
+              ? SPECIES_WINDOW_FRAME
+              : win.id === "assistant"
+                ? ASSISTANT_WINDOW_FRAME
+                : {};
         return (
           <Window
             key={win.id}
