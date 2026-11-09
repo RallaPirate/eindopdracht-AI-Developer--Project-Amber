@@ -75,7 +75,7 @@ function installDom() {
   };
 }
 
-function createDatabase() {
+function createDatabase(readDraftPage) {
   let readError = null;
   let defer = false;
   const waiting = [];
@@ -92,6 +92,17 @@ function createDatabase() {
   }
   const client = {
     from(table) {
+      if (table === "reports") {
+        const request = { table, filters: [], orders: [] };
+        const query = {
+          select(columns) { request.columns = columns; return query; },
+          eq(...filter) { request.filters.push(filter); return query; },
+          order(column, { ascending }) { request.orders.push([column, ascending]); return query; },
+          range(...range) { request.range = range; return query; },
+          abortSignal(signal) { return readDraftPage({ ...request, signal }); },
+        };
+        return query;
+      }
       if (table === "species_database") {
         return {
           select() {
@@ -190,11 +201,11 @@ function alerts() {
   return [...document.querySelectorAll("[role='alert']")];
 }
 
-function grant(qc, userId) {
+function grant(qc, userId, role = "employee") {
   qc.bindBrowserQueryCacheToUser(userId);
   qc.applyBrowserPermissionRead(userId, {
     status: "active",
-    role: "employee",
+    role,
     displayName: userId,
   });
 }
@@ -219,13 +230,13 @@ async function setSelect(act, element, value) {
   });
 }
 
-async function runDom(fn) {
+async function runDom(fn, readDraftPage) {
   const installed = installDom();
   const React = require("react");
   const { createRoot } = require("react-dom/client");
   const { act } = React;
   const { QueryClientProvider } = require("@tanstack/react-query");
-  const database = createDatabase();
+  const database = createDatabase(readDraftPage);
   const load = loadGraph(database);
   const qc = load("@/lib/queryClient");
   const client = qc.getQueryClient();
@@ -237,7 +248,7 @@ async function runDom(fn) {
   const emissions = [];
   try {
     await fn({
-      React, act, root, client, qc, database, QueryClientProvider, app, emissions,
+      React, act, root, client, qc, database, QueryClientProvider, app, emissions, load,
     });
   } finally {
     try {
@@ -298,6 +309,131 @@ test("a failed species load can be retried in place", async () => {
     await waitFor(act, () => document.getElementById("report-species") !== null);
     assert.equal(alerts().length, 0);
     assert.equal(document.getElementById("report-specimen").disabled, true);
+  });
+});
+
+function renderReports({ React, QueryClientProvider, client, load }) {
+  const { ReportsApp } = load("./ReportsApp.tsx");
+  return React.createElement(QueryClientProvider, { client }, React.createElement(ReportsApp));
+}
+
+function draftRow(index, fields = {}) {
+  return {
+    id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    species_id: LYNX,
+    title: `Draft ${index}`,
+    report_type: "care",
+    updated_at: UPDATED_AT,
+    ...fields,
+  };
+}
+
+function draftRegion() {
+  return document.querySelector("section[aria-label='My drafts']");
+}
+
+test("Reports lists ordered draft pages with nullable fields and keeps the subject selector usable", async () => {
+  const requests = [];
+  const recent = draftRow(1, { updated_at: "2026-11-09T13:00:00+01:00" });
+  const older = draftRow(1001, { title: null, report_type: null });
+  await runDom(async (h) => {
+    await h.act(async () => {
+      grant(h.qc, "user-a");
+      h.root.render(renderReports(h));
+    });
+    await waitFor(h.act, () => draftRegion()?.querySelectorAll("li").length === 1001);
+    const rows = draftRegion().querySelectorAll("li");
+    assert.equal(text(rows[0].querySelector("p")), "Draft 1");
+    assert.match(text(rows[0]), /care · Updated/);
+    assert.equal(rows[0].querySelector("time").dateTime, recent.updated_at);
+    assert.equal(text(rows[1000].querySelector("p")), "Untitled draft");
+    assert.match(text(rows[1000]), /No type set · Updated/);
+    assert.equal(rows[1000].querySelector("time").dateTime, older.updated_at);
+
+    assert.deepEqual(requests.map(({ range }) => range), [[0, 999], [1000, 1999]]);
+    for (const request of requests) {
+      assert.equal(request.table, "reports");
+      assert.equal(request.columns, "id, title, report_type, species_id, updated_at");
+      assert.deepEqual(request.filters, [["review_status", "draft"], ["record_status", "active"]]);
+      assert.deepEqual(request.orders, [["updated_at", false], ["id", true]]);
+      assert.ok(request.signal instanceof AbortSignal);
+    }
+
+    await choose(h.act, LYNX, ASH);
+    assert.equal(document.getElementById("report-species").value, LYNX);
+    assert.equal(document.getElementById("report-specimen").value, ASH);
+    assert.equal(draftRegion().querySelectorAll("li").length, 1001);
+  }, (request) => {
+    requests.push(request);
+    const data = request.range[0] === 0
+      ? [recent, ...Array.from({ length: 999 }, (_, index) => draftRow(index + 2))]
+      : [older];
+    return Promise.resolve({ data, error: null });
+  });
+});
+
+test("Reports distinguishes database and payload failures from an empty list and can retry", async () => {
+  let response = { data: null, error: READ_FAILURE };
+  await runDom(async (h) => {
+    await h.act(async () => {
+      grant(h.qc, "user-a");
+      h.root.render(renderReports(h));
+    });
+    await waitFor(h.act, () => buttonByText("Retry draft list") !== null);
+    assert.match(text(draftRegion()), /Unable to complete the database operation/);
+    assert.doesNotMatch(text(draftRegion()), /secret|No drafts yet/);
+
+    response = { data: [draftRow(1, { updated_at: "invalid date" })], error: null };
+    await h.act(async () => { buttonByText("Retry draft list").click(); });
+    await waitFor(h.act, () => text(draftRegion()).includes("The provided input is invalid."));
+    assert.doesNotMatch(text(draftRegion()), /No drafts yet/);
+
+    response = { data: [], error: null };
+    await h.act(async () => { buttonByText("Retry draft list").click(); });
+    await waitFor(h.act, () => text(draftRegion()).includes("No drafts yet."));
+    assert.equal(draftRegion().querySelector("[role='alert']"), null);
+  }, () => Promise.resolve(response));
+});
+
+test("Reports waits for verified access and drops prior drafts and late results across account changes", async () => {
+  const requests = [];
+  const ownDraftKey = (user) => ["auth-user", user, "reports", "own-drafts"];
+  let loadPage = () => Promise.resolve({ data: [draftRow(1, { title: "Author A draft" })], error: null });
+  await runDom(async (h) => {
+    const { act, client, qc, root } = h;
+    await act(async () => { root.render(renderReports(h)); });
+    assert.match(text(draftRegion()), /Loading drafts/);
+    assert.equal(requests.length, 0);
+    await act(async () => { qc.bindBrowserQueryCacheToUser("user-a"); });
+    assert.equal(requests.length, 0);
+    await act(async () => { grant(qc, "user-a", "senior"); });
+    await waitFor(act, () => text(draftRegion()).includes("Author A draft"));
+    assert.ok(client.getQueryData(ownDraftKey("user-a")));
+
+    let resolveLate;
+    loadPage = () => new Promise((resolve) => { resolveLate = resolve; });
+    await act(async () => { void client.invalidateQueries({ queryKey: ownDraftKey("user-a") }); });
+    await waitFor(act, () => resolveLate !== undefined);
+    const lateSignal = requests.at(-1).signal;
+    loadPage = () => Promise.resolve({ data: [draftRow(2, { title: "Author B draft" })], error: null });
+    await act(async () => { grant(qc, "user-b", "management"); });
+    assert.equal(lateSignal.aborted, true);
+    assert.doesNotMatch(text(draftRegion()), /Author A draft/);
+    assert.equal(client.getQueryData(ownDraftKey("user-a")), undefined);
+    await act(async () => {
+      resolveLate({ data: [draftRow(3, { title: "Late draft from A" })], error: null });
+    });
+    await waitFor(act, () => text(draftRegion()).includes("Author B draft"));
+    assert.doesNotMatch(text(draftRegion()), /Late draft from A/);
+    assert.equal(client.getQueryData(ownDraftKey("user-a")), undefined);
+
+    await act(async () => { qc.bindBrowserQueryCacheToUser(null); });
+    assert.doesNotMatch(text(draftRegion()), /Author B draft/);
+    assert.equal(client.getQueryData(ownDraftKey("user-b")), undefined);
+    assert.equal(requests.length, 3);
+  }, (request) => {
+    requests.push(request);
+    return loadPage();
   });
 });
 
