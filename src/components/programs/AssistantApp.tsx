@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, isToolUIPart, type UIMessage } from "ai";
 import { useVerifiedAuthSnapshot } from "@/hooks/useAuthenticatedQuery";
@@ -8,6 +8,28 @@ import { getVerifiedAuthSnapshot, subscribeVerifiedAuthSnapshot } from "@/lib/qu
 
 type ChatMessage = UIMessage<{ incomplete?: boolean }>;
 type Owner = { userId: string; role: string; accessEpoch: number };
+
+function renderAssistantText(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let start = 0;
+  while (start < text.length) {
+    const open = text.indexOf("**", start);
+    if (open === -1) {
+      nodes.push(text.slice(start));
+      break;
+    }
+    const close = text.indexOf("**", open + 2);
+    if (close === -1 || close === open + 2) {
+      nodes.push(text.slice(start, open + 2));
+      start = open + 2;
+      continue;
+    }
+    if (open > start) nodes.push(text.slice(start, open));
+    nodes.push(<strong key={open}>{text.slice(open + 2, close)}</strong>);
+    start = close + 2;
+  }
+  return nodes;
+}
 
 function current(owner: Owner) {
   const access = getVerifiedAuthSnapshot();
@@ -24,6 +46,7 @@ function AssistantChat({ owner: initialOwner }: { owner: Owner }) {
   const [owner] = useState(initialOwner);
   const [input, setInput] = useState("");
   const [notice, setNotice] = useState("");
+  const [interruptedMessages, setInterruptedMessages] = useState<Set<string>>(() => new Set());
   const scroll = useRef<HTMLDivElement>(null);
   const [transport] = useState(() => new DefaultChatTransport<ChatMessage>({
     api: "/api/agent", credentials: "same-origin",
@@ -70,14 +93,18 @@ function AssistantChat({ owner: initialOwner }: { owner: Owner }) {
   const { messages, sendMessage, status, error, stop, clearError, setMessages } = useChat<ChatMessage>({
     transport,
     onFinish: ({ isAbort, isError, message }) => {
-      if (current(owner) && (isAbort || isError || message.metadata?.incomplete)) setNotice("The answer is incomplete. You can send another question.");
+      if (!current(owner)) return;
+      // The SDK retains unfinished tool parts on abort. Keep cancellation
+      // presentation with that response, independently of the next request.
+      if (isAbort) setInterruptedMessages((ids) => new Set(ids).add(message.id));
+      if (isAbort || isError || message.metadata?.incomplete) setNotice("The answer is incomplete. You can send another question.");
     },
   });
   const busy = status === "submitted" || status === "streaming";
 
   useEffect(() => {
     const reset = () => {
-      if (!current(owner)) { void stop(); setMessages([]); setInput(""); setNotice(""); clearError(); }
+      if (!current(owner)) { void stop(); setMessages([]); setInput(""); setNotice(""); setInterruptedMessages(new Set()); clearError(); }
     };
     const unsubscribe = subscribeVerifiedAuthSnapshot(reset);
     reset();
@@ -87,19 +114,20 @@ function AssistantChat({ owner: initialOwner }: { owner: Owner }) {
 
   return (
     <section aria-label="Operational Assistant" className="flex h-full min-h-0 flex-col gap-2 text-sm">
-      <p className="shrink-0 text-xs">Local species guidance · offshore Costa Rica weather · temporary chat</p>
+      <p className="shrink-0 text-xs">Local species guidance · classified offshore reserve weather · temporary chat</p>
       <div ref={scroll} role="log" aria-label="Conversation" aria-live="polite" className="os-bevel-in min-h-0 flex-1 space-y-3 overflow-y-auto p-2">
         {messages.length === 0 && <p>Ask about a local species or the weather. Reports, specimens and knowledge-index evidence are unavailable in this Assistant.</p>}
         {messages.map((message) => <div key={message.id}>
           <p className="font-bold">{message.role === "user" ? "You" : "Assistant"}</p>
           {message.parts.map((part, index) => {
-            if (part.type === "text") return <p key={index} className="whitespace-pre-wrap break-words">{part.text}</p>;
+            if (part.type === "text") return <p key={index} className="whitespace-pre-wrap break-words">{message.role === "assistant" ? renderAssistantText(part.text) : part.text}</p>;
             if (isToolUIPart(part)) {
               const failed = part.state === "output-error" || (part.state === "output-available" && typeof part.output === "object" && part.output !== null && "ok" in part.output && part.output.ok === false);
-              return <p key={index} className="text-xs">{part.type === "tool-searchSpecies" ? "Species search" : "Weather retrieval"}: {failed ? "data unavailable" : part.state === "output-available" ? "complete" : "working…"}</p>;
+              return <p key={index} className="text-xs">{part.type === "tool-searchSpecies" ? "Species search" : "Weather retrieval"}: {failed ? "data unavailable" : part.state === "output-available" ? "complete" : interruptedMessages.has(message.id) ? "interrupted" : "working…"}</p>;
             }
             return null;
           })}
+          {interruptedMessages.has(message.id) && <p className="text-xs">Response interrupted. This answer is incomplete.</p>}
         </div>)}
       </div>
       {busy && <p role="status">{status === "submitted" ? "Connecting…" : "Assistant is responding…"}</p>}

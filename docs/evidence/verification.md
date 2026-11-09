@@ -95,3 +95,102 @@ Section 3.9: PASS
 Observations: The species browse list does not refresh automatically after successful creation (recorded as SPECIES-UI-01). The PostgreSQL integration test was skipped, and no new direct live write-denial tests were performed during this production pass.
 
 Conclusion: The deployed species workflow has been verified through the principal creation, editing, authorisation and error-handling scenarios. Outstanding limitations are documented.
+
+
+PROJECT AMBER — ASSISTANT MVP LOCAL VERIFICATION
+Date: 08-11-2026
+Environment: Local development; authenticated browser sessions
+Feature: Assistant.exe — minimal streaming operational Assistant
+Scope: AI SDK streaming, local species retrieval and Open-Meteo
+AUTOMATED TESTS (LOCAL)
+Initial implementation:
+Passed: 296
+Skipped: 1 (existing PostgreSQL integration test)
+
+Independent review:
+Passed: 73 server tests
+Skipped: 1 (PostgreSQL integration test)
+
+Wildcard regression fix: 14 focused tests passed
+TypeScript: PASS
+Targeted Assistant ESLint: PASS
+Production build: PASS (original implementation run)
+
+Additional automated coverage:
+- Scripted-model test demonstrated sequential species retrieval → returned evidence → subsequent weather-tool decision → final answer.
+- DOM tests covered incremental streaming, cancellation, recovery and simulated account-switch isolation.
+Notes: These are reported tool-run results. The manual browser tests below provide separate real-application evidence. The two skipped-test statements refer to their respective test runs; no combined total is asserted.
+LOCAL APPLICATION TESTS
+Mark each test PASS / PARTIAL / FAIL / NOT TESTED.
+
+[X] 01. Local Assistant UI
+Assistant opens in its 680 × 500 desktop window; messages and controls render.
+Result: PASS
+Notes:
+
+[X] 02. Live species retrieval
+A Gallimimus question invokes species search and identifies the required minimum number of handlers.
+Result: PASS
+Notes: Correctly identified the three-handler minimum.
+
+[X] 03. Live weather retrieval
+Open-Meteo provides forecast information in the browser conversation.
+Result: PASS
+Notes:
+
+[X] 04. Combined species and weather reasoning
+Assistant combines species handling guidance with tomorrow's forecast.
+Result: PASS
+Notes: Combined Gallimimus guidance and weather information, acknowledging forecast limitations.
+
+[X] 05. Contextual follow-up
+Assistant understands a follow-up about moving the same specimen with two colleagues.
+Result: PASS
+Notes:
+
+[X] 06. Additional species question
+A Compsognathus question returns the species' handling requirement without assuming that transporting multiple specimens alone is safe.
+Result: PASS
+Notes: Correctly identified the one-handler minimum; did not assume that transporting three specimens alone was automatically safe.
+
+[X] 07. Off-topic request
+Assistant declines a chocolate brownie recipe and remains within its operational scope.
+Result: PASS
+Notes:
+
+[X] 08. Stop and recovery
+Stop interrupts generation; a subsequent question can be answered.
+Result: PARTIAL
+Notes: An incomplete-answer notice appeared initially, then disappeared. A subsequent question succeeded, but the previous tool label remained stuck at “Species search: working...”.
+
+[X] 09. Logout and return
+Previous conversation does not reappear after logout and return.
+Result: PASS
+Notes:
+
+[X] 10. Switch between accounts
+Account B does not inherit Account A's conversation.
+Result: PASS
+Notes:
+
+[ ] 11. Account switch during active streaming
+Switch accounts while the Assistant is still generating.
+Result: NOT TESTED
+Notes: Generation completed before the switch could be performed. The BioReserve OS loading sequence also delays account changes.
+KNOWN MINOR UI ISSUES
+1. Inline Markdown bold syntax (**text**) displays literally.
+2. An interrupted species-tool call can retain a “working...” label after cancellation, even when later requests succeed.
+3. The incomplete-answer notification disappeared after initially appearing.
+4. Weather wording could use the reserve's fictional classification terminology while keeping representative offshore weather distinct from actual local conditions.
+REMAINING VERIFICATION
+[ ] Confirm live streaming and hosted RLS after deployment.
+[ ] Test Employee, Senior and Management access where accounts are available.
+[ ] Verify account isolation during active streaming if a reproducible test becomes practical.
+[ ] Confirm deployed Stop/error recovery and mobile/narrow-viewport presentation.
+[ ] Capture deployment URL, final screenshots and test evidence.
+FINAL VERDICT
+Assistant MVP (local): PASS for principal functional tests; PARTIAL for Stop/recovery; deployment verification pending.
+
+Observations: Species retrieval, Open-Meteo retrieval, multi-source reasoning, contextual follow-ups and basic session isolation passed in local browser tests. Cancellation exposed minor UI-state defects. Account switching during active streaming was not tested.
+
+Conclusion: The local Assistant MVP is functional and has passed the principal conversational, retrieval and basic session-isolation tests. Remaining issues concern minor UI presentation and deployment-specific verification gaps. Full Section 7 implementation is intentionally deferred.
