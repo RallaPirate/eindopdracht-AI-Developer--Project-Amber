@@ -184,11 +184,24 @@ KNOWN MINOR UI ISSUES
 4. Weather wording could use the reserve's fictional classification terminology while keeping representative offshore weather distinct from actual local conditions.
 [X] FIX MINOR UI ISSUES MENTIONED ABOVE
 REMAINING VERIFICATION
-[ ] Confirm live streaming and hosted RLS after deployment.
-[ ] Test Employee, Senior and Management access where accounts are available.
-[ ] Verify account isolation during active streaming if a reproducible test becomes practical.
-[ ] Confirm deployed Stop/error recovery and mobile/narrow-viewport presentation.
-[ ] Capture deployment URL, final screenshots and test evidence.
+Environment: Vercel production
+Date: 9 November 2026
+Deployment URL: https://project-amber-blond.vercel.app/
+Tested commit: [Insert deployed commit SHA]
+Production streaming: Assistant.exe sends and receives streamed responses successfully.
+[X] Species retrieval: Agent retrieves an existing species through the authenticated, RLS-scoped database client.
+[X] External weather retrieval: Agent successfully calls Open-Meteo and incorporates the forecast into its answer.
+[X] Combined reasoning: Agent uses species guidance and weather information together in an operational recommendation.
+[X] Role access: Verify Employee, Senior and Management accounts where available. All three should have the same permitted species read access.
+[X] Authentication and isolation: Verify that signed-out users cannot access the Assistant and that conversations do not persist between accounts.
+[X] Stop and recovery: Interrupt a response, confirm the interrupted state remains visible, and successfully send another message.
+[ ] Evidence: Record the deployment URL, commit SHA, relevant screenshots and observed test results.
+
+Existing security evidence: Database RLS policies were verified during the database foundation work. Independent Assistant code review and automated tests confirmed authenticated, caller-scoped retrieval without service-role access.
+Deferred verification: Account switching during active streaming was not practical during local testing because responses completed too quickly. Automated session-isolation tests passed.
+
+Final production verdict: PENDING
+
 FINAL VERDICT
 Assistant MVP (local): PASS for principal functional tests; PASS for Stop/recovery; deployment verification pending.
 
