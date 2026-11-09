@@ -23,6 +23,13 @@ const SPECIES_WINDOW_FRAME = {
   maxHeight: "calc(100% - 16px)",
 };
 
+const ASSISTANT_WINDOW_FRAME = {
+  width: 680,
+  height: 500,
+  maxWidth: "calc(100% - 16px)",
+  maxHeight: "calc(100% - 16px)",
+};
+
 /** First column: 4 icons; second column: 1 icon (Personnel). */
 const ICON_LAYOUT: { id: ProgramId; column: number; row: number }[] = [
   { id: "reports", column: 0, row: 0 },
@@ -75,7 +82,12 @@ export function Desktop({
 
       {windows.map((win) => {
         const program = getProgram(win.id);
-        const frame = win.id === "species-database" ? SPECIES_WINDOW_FRAME : {};
+        const frame =
+          win.id === "species-database"
+            ? SPECIES_WINDOW_FRAME
+            : win.id === "assistant"
+              ? ASSISTANT_WINDOW_FRAME
+              : {};
         return (
           <Window
             key={win.id}

@@ -31,6 +31,15 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   smoke test.
   Priority: Low — pre-existing, non-blocking.
 
+  - [ ] **SPECIES-UI-01 — Species list does not refresh after accepting a new species.**
+  - Observed during Step 3.9 production verification (8 November 2026).
+  - After Management successfully accepts and saves an AI-generated species proposal, the new species does not appear in the existing Species Database browse list.
+  - Closing and reopening the Species Database window displays the newly created species correctly, confirming that persistence succeeded.
+  - Expected: the browse list updates automatically after successful acceptance, without requiring the window to be reopened.
+  - Investigate the TanStack Query cache invalidation/refetch and list synchronisation following species acceptance. The acceptance mutation already requests invalidation, so verify why the mounted list remains stale before changing the implementation.
+  - Verify after fixing: an accepted species appears immediately; rejected proposals do not alter the list; existing authentication-aware cache isolation remains intact.
+  - **Priority:** Low — non-blocking usability defect. Defer until after the essential implementation milestones.
+
 ## Authentication improvements
 
 - [ ] **AUTH-01 — Session verification errors have no recovery UI.**
