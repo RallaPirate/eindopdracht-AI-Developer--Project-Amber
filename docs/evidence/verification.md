@@ -187,7 +187,8 @@ REMAINING VERIFICATION
 Environment: Vercel production
 Date: 9 November 2026
 Deployment URL: https://project-amber-blond.vercel.app/
-Tested commit: [Insert deployed commit SHA]
+Tested commit: main bee6e99026be3121b2c22e99b2c0590f9b28dbd3
+Deployment status: READY — verified through Vercel
 Production streaming: Assistant.exe sends and receives streamed responses successfully.
 [X] Species retrieval: Agent retrieves an existing species through the authenticated, RLS-scoped database client.
 [X] External weather retrieval: Agent successfully calls Open-Meteo and incorporates the forecast into its answer.
@@ -195,7 +196,7 @@ Production streaming: Assistant.exe sends and receives streamed responses succes
 [X] Role access: Verify Employee, Senior and Management accounts where available. All three should have the same permitted species read access.
 [X] Authentication and isolation: Verify that signed-out users cannot access the Assistant and that conversations do not persist between accounts.
 [X] Stop and recovery: Interrupt a response, confirm the interrupted state remains visible, and successfully send another message.
-[ ] Evidence: Record the deployment URL, commit SHA, relevant screenshots and observed test results.
+[X] Evidence: Record the deployment URL, commit SHA, relevant screenshots and observed test results.
 
 Existing security evidence: Database RLS policies were verified during the database foundation work. Independent Assistant code review and automated tests confirmed authenticated, caller-scoped retrieval without service-role access.
 Deferred verification: Account switching during active streaming was not practical during local testing because responses completed too quickly. Automated session-isolation tests passed.

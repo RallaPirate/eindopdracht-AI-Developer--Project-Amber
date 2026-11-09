@@ -57,7 +57,7 @@ The course reference specifically gives us the streamText + tools + Zod inputSch
 
 ### 4. Specimens and report authoring
 
-- [ ] 4.1 Implement specimen listing/selection.
+- [X] 4.1 Implement specimen listing/selection.
 - [ ] 4.2 Implement Management specimen creation.
 - [ ] 4.3 Implement role-appropriate specimen updates: Senior and Management can update nickname, DOB, measurements, location and status, Management can update lysine protocol.
 - [ ] 4.4 Implement own-report draft listing.
