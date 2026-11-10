@@ -75,7 +75,7 @@ function installDom() {
   };
 }
 
-function createDatabase(readDraftPage) {
+function createDatabase(readDraftPage, writeDraft) {
   let readError = null;
   let defer = false;
   const waiting = [];
@@ -95,6 +95,19 @@ function createDatabase(readDraftPage) {
       if (table === "reports") {
         const request = { table, filters: [], orders: [] };
         const query = {
+          insert(payload) {
+            return {
+              select(columns) {
+                return {
+                  single: () => ({
+                    setHeader: (name, value) => writeDraft({
+                      table, payload: { ...payload }, columns, headers: { [name]: value },
+                    }),
+                  }),
+                };
+              },
+            };
+          },
           select(columns) { request.columns = columns; return query; },
           eq(...filter) { request.filters.push(filter); return query; },
           order(column, { ascending }) { request.orders.push([column, ascending]); return query; },
@@ -230,15 +243,22 @@ async function setSelect(act, element, value) {
   });
 }
 
-async function runDom(fn, readDraftPage) {
+async function runDom(fn, readDraftPage, writeDraft) {
   const installed = installDom();
   const React = require("react");
   const { createRoot } = require("react-dom/client");
   const { act } = React;
   const { QueryClientProvider } = require("@tanstack/react-query");
-  const database = createDatabase(readDraftPage);
+  const database = createDatabase(readDraftPage, writeDraft);
   const load = loadGraph(database);
   const qc = load("@/lib/queryClient");
+  database.client.auth = {
+    async getSession() {
+      const { userId } = qc.getVerifiedAuthSnapshot();
+      const session = userId ? { user: { id: userId }, access_token: `token-${userId}` } : null;
+      return { data: { session }, error: null };
+    },
+  };
   const client = qc.getQueryClient();
   client.setDefaultOptions({
     queries: { retry: false, retryDelay: 0, gcTime: Infinity },
@@ -332,6 +352,335 @@ function draftRegion() {
   return document.querySelector("section[aria-label='My drafts']");
 }
 
+const ownDraftKey = (user) => ["auth-user", user, "reports", "own-drafts"];
+const draftForm = () => document.querySelector("form");
+const field = (name) => draftForm().elements.namedItem(name);
+const readDrafts = (data = []) => Promise.resolve({ data, error: null });
+
+function persistedDraft(payload, fields = {}) {
+  return draftRow(4, {
+    species_id: payload.species_id,
+    specimen_id: payload.specimen_id,
+    title: payload.title,
+    report_type: payload.report_type,
+    created_by: "00000000-0000-4000-8000-000000000080",
+    review_status: "draft",
+    record_status: "active",
+    ...fields,
+  });
+}
+
+async function mountReports(h, role = "employee") {
+  await h.act(async () => {
+    grant(h.qc, "user-a", role);
+    h.root.render(renderReports(h));
+  });
+  await waitFor(h.act, () => document.getElementById("report-species") !== null);
+}
+
+async function saveDraft(act) {
+  await act(async () => { buttonByText("Save draft").click(); });
+}
+
+test("Reports saves a full draft once and replaces a pending pre-INSERT read with fresh data", async () => {
+  const reads = [];
+  const writes = [];
+  await runDom(async (h) => {
+    await mountReports(h);
+    await choose(h.act, LYNX, ASH);
+    field("report_type").value = "medical";
+    field("title").value = "  Check Ash  ";
+    field("body").value = "First line\nSecond line  ";
+    assert.match(text(draftRegion()), /Loading drafts/);
+    assert.equal(reads.length, 1);
+
+    await h.act(async () => {
+      buttonByText("Save draft").click();
+      buttonByText("Save draft").click();
+    });
+    await waitFor(h.act, () => writes.length > 0 && buttonByText("Save draft").disabled);
+    assert.match(text(draftForm()), /Saving draft/);
+    assert.equal(writes.length, 1);
+    const { request, resolve } = writes[0];
+    assert.equal(request.table, "reports");
+    assert.deepEqual(request.headers, { Authorization: "Bearer token-user-a" });
+    assert.deepEqual(request.payload, {
+      species_id: LYNX,
+      specimen_id: ASH,
+      report_type: "medical",
+      title: "  Check Ash  ",
+      body: "First line\nSecond line  ",
+    });
+    assert.equal(request.columns, "id, title, report_type, species_id, updated_at, specimen_id, created_by, review_status, record_status");
+    const created = persistedDraft(request.payload);
+    await h.act(async () => { resolve({ data: created, error: null }); });
+    await waitFor(h.act, () => text(draftForm()).includes("Draft saved."));
+    assert.equal(reads.length, 2);
+    assert.equal(reads[0].signal.aborted, true);
+    assert.match(text(draftRegion()), /Check Ash/);
+    assert.equal(field("title").value, "");
+    assert.equal(document.getElementById("report-species").value, "");
+
+    await h.act(async () => { reads[0].resolve({ data: [], error: null }); });
+    assert.match(text(draftRegion()), /Check Ash/);
+
+    const fresh = draftRow(1, { title: "Another draft from fresh read", updated_at: "2026-03-15T14:30:45.123457Z" });
+    await h.act(async () => { reads[1].resolve({ data: [fresh, created], error: null }); });
+    await waitFor(h.act, () => draftRegion().querySelectorAll("li").length === 2);
+    assert.match(text(draftRegion().querySelector("li")), /Another draft from fresh read/);
+    assert.match(text(draftRegion()), /Check Ash/);
+    assert.equal(writes.length, 1);
+  }, ({ signal }) => new Promise((resolve) => reads.push({ signal, resolve })),
+  (request) => new Promise((resolve) => writes.push({ request, resolve })));
+});
+
+test("Reports keeps 1,001 unique drafts when an INSERT shifts the page boundary and refresh fails", async () => {
+  const originalRows = Array.from({ length: 1000 }, (_, index) => draftRow(index + 1));
+  const reads = [];
+  let readSecondPage;
+  let finishWrite;
+  let created;
+  await runDom(async (h) => {
+    const key = ownDraftKey("user-a");
+    await mountReports(h);
+    await waitFor(h.act, () => readSecondPage !== undefined);
+    await choose(h.act, LYNX);
+    field("title").value = "Saved between pages";
+    await saveDraft(h.act);
+    await waitFor(h.act, () => created !== undefined);
+
+    await h.act(async () => { readSecondPage(); });
+    await waitFor(h.act, () => h.client.getQueryState(key)?.status === "success");
+    const beforeResponse = h.client.getQueryData(key);
+    assert.equal(beforeResponse.some(({ id }) => id === created.id), false);
+    assert.match(text(draftForm()), /Saving draft/);
+
+    await h.act(async () => { finishWrite({ data: created, error: null }); });
+    await waitFor(h.act, () => buttonByText("Retry draft list") !== null);
+    assert.deepEqual(reads.slice(0, 3), [[0, 999], [1000, 1999], [0, 999]]);
+    const cached = h.client.getQueryData(key);
+    const ids = [...cached].map(({ id }) => id);
+    assert.equal(ids.length, 1001);
+    assert.equal(new Set(ids).size, 1001);
+    assert.deepEqual(ids, [created.id, ...originalRows.map(({ id }) => id)]);
+    assert.match(text(draftRegion()), /Saved between pages/);
+    assert.equal(draftRegion().querySelectorAll("li").length, 1001);
+    assert.equal(beforeResponse.length, 1000);
+    assert.equal(new Set(beforeResponse.map(({ id }) => id)).size, 1000);
+  }, ({ range }) => {
+    reads.push(range);
+    if (reads.length === 1) return readDrafts(originalRows);
+    if (reads.length === 2) {
+      return new Promise((resolve) => {
+        // The second page is read after the INSERT commits, while its response is still pending.
+        readSecondPage = () => {
+          const page = [created, ...originalRows].slice(range[0], range[1] + 1);
+          assert.deepEqual(page, [originalRows.at(-1)]);
+          resolve({ data: page, error: null });
+        };
+      });
+    }
+    return Promise.resolve({ data: null, error: READ_FAILURE });
+  }, ({ payload }) => new Promise((resolve) => {
+    created = persistedDraft(payload, { id: draftRow(1001).id, updated_at: "2026-11-10T12:00:00Z" });
+    finishWrite = resolve;
+  }));
+});
+
+test("Reports deduplicates the cache on save and prefers the confirmed INSERT row", async () => {
+  const existing = draftRow(1);
+  const staleCopy = draftRow(4, { title: "Stale cached copy" });
+  let saved = false;
+  await runDom(async (h) => {
+    const key = ownDraftKey("user-a");
+    await mountReports(h);
+    await waitFor(h.act, () => h.client.getQueryState(key)?.status === "success");
+    await choose(h.act, LYNX);
+    field("title").value = "Confirmed draft";
+    await h.act(async () => {
+      h.client.setQueryData(key, [existing, { ...existing }, staleCopy]);
+      buttonByText("Save draft").click();
+    });
+    await waitFor(h.act, () => buttonByText("Retry draft list") !== null);
+    assert.deepEqual(Array.from(h.client.getQueryData(key), (row) => ({ ...row })), [
+      existing, { ...staleCopy, title: "Confirmed draft", report_type: null },
+    ]);
+  }, () => saved ? Promise.resolve({ data: null, error: READ_FAILURE }) : readDrafts([existing]), ({ payload }) => {
+    saved = true;
+    return Promise.resolve({ data: persistedDraft(payload), error: null });
+  });
+});
+
+test("Reports clears the old specimen on species change and saves nullable fields", async () => {
+  const writes = [];
+  let finishRefresh;
+  const later = draftRow(2, { updated_at: "2026-03-15T14:30:45.123457Z" });
+  const tied = draftRow(3, { updated_at: "2026-03-15T15:30:45.123456+01:00" });
+  await runDom(async (h) => {
+    await mountReports(h, "senior");
+    await waitFor(h.act, () => draftRegion().querySelectorAll("li").length === 2);
+    await choose(h.act, LYNX, ASH);
+    await choose(h.act, FERN);
+    assert.equal(document.getElementById("report-specimen").value, "");
+    field("title").value = "   ";
+    field("body").value = "";
+    await saveDraft(h.act);
+    await waitFor(h.act, () => text(draftForm()).includes("Draft saved."));
+    assert.deepEqual(writes, [{
+      species_id: FERN, specimen_id: null, report_type: null, title: null, body: null,
+    }]);
+    await waitFor(h.act, () => draftRegion().querySelectorAll("li").length === 3);
+    const titles = [...draftRegion().querySelectorAll("li p:first-child")].map(text);
+    assert.deepEqual(titles, ["Draft 2", "Draft 3", "Untitled draft"]);
+    await h.act(async () => {
+      finishRefresh({ data: [later, tied, persistedDraft(writes[0])], error: null });
+    });
+  }, () => writes.length
+    ? new Promise((resolve) => { finishRefresh = resolve; })
+    : readDrafts([later, tied]), ({ payload }) => {
+    writes.push(payload);
+    return Promise.resolve({ data: persistedDraft(payload), error: null });
+  });
+});
+
+test("Report draft text treats only empty and ordinary-space-only strings as null", async () => {
+  await runDom(async ({ load }) => {
+    const { newReportDraftSchema } = load("./createReportDraft.ts");
+    const cases = [
+      ["", null],
+      ["   ", null],
+      ["\t", "\t"],
+      ["\n", "\n"],
+      ["\u00a0", "\u00a0"],
+      ["  \n", "  \n"],
+      [" \tDraft text\u00a0 ", " \tDraft text\u00a0 "],
+    ];
+    for (const [value, expected] of cases) {
+      const { title, body } = newReportDraftSchema.parse({
+        species_id: LYNX, specimen_id: null, report_type: null, title: value, body: value,
+      });
+      assert.equal(title, expected, `title for ${JSON.stringify(value)}`);
+      assert.equal(body, expected, `body for ${JSON.stringify(value)}`);
+    }
+  });
+});
+
+test("Reports rejects missing or unavailable species and incompatible specimens before INSERT", async () => {
+  const writes = [];
+  await runDom(async (h) => {
+    await mountReports(h);
+    await saveDraft(h.act);
+    assert.match(text(draftForm()), /Choose a valid species/);
+
+    await choose(h.act, LYNX, ASH);
+    const specimenKey = ["auth-user", "user-a", "specimens", "by-species", LYNX];
+    await h.act(async () => {
+      // The list changes before React has reconciled the selected specimen.
+      h.client.setQueryData(specimenKey, [SPECIMEN_ROWS.find((row) => row.id === MOSS)]);
+      buttonByText("Save draft").click();
+    });
+    await waitFor(h.act, () => text(draftForm()).includes("Could not save draft."));
+
+    await choose(h.act, FERN);
+    await h.act(async () => {
+      h.client.setQueryData(["auth-user", "user-a", "species-database", "list"], []);
+      buttonByText("Save draft").click();
+    });
+    await waitFor(h.act, () => text(draftForm()).includes("Could not save draft."));
+    assert.equal(writes.length, 0);
+    assert.doesNotMatch(text(draftForm()), /Draft saved/);
+  }, () => readDrafts(), (request) => {
+    writes.push(request);
+    return Promise.resolve({ data: persistedDraft(request.payload), error: null });
+  });
+});
+
+test("Reports retains inputs and creates no phantom draft on FK rejection or unconfirmed INSERT", async () => {
+  const writes = [];
+  const responses = [
+    () => ({ data: null, error: { code: "23503", message: "private composite FK error" } }),
+    () => ({ data: null, error: null }),
+    (payload) => ({ data: persistedDraft(payload, { record_status: "archived" }), error: null }),
+  ];
+  await runDom(async (h) => {
+    h.client.setDefaultOptions({ ...h.client.getDefaultOptions(), mutations: { retry: 2, retryDelay: 0 } });
+    await mountReports(h, "management");
+    await choose(h.act, LYNX, ASH);
+    field("title").value = "Keep my text";
+    for (let count = 1; count <= responses.length; count++) {
+      await saveDraft(h.act);
+      await waitFor(h.act, () => writes.length >= count && text(draftForm()).includes("Could not save draft."));
+      assert.equal(writes.length, count);
+      assert.equal(field("title").value, "Keep my text");
+      assert.doesNotMatch(text(draftForm()), /Draft saved|private composite FK error/);
+      assert.equal(draftRegion().querySelectorAll("li").length, 0);
+      assert.equal(h.client.getQueryData(ownDraftKey("user-a")).length, 0);
+    }
+  }, () => readDrafts(), ({ payload }) => {
+    const response = responses[writes.length];
+    writes.push(payload);
+    return Promise.resolve(response(payload));
+  });
+});
+
+for (const nextUser of [null, "user-b"]) {
+  test(`Reports discards the prior form and pending save result on ${nextUser ? "account switch" : "logout"}`, async () => {
+    let finishWrite;
+    let rows = [];
+    const writes = [];
+    await runDom(async (h) => {
+      await mountReports(h);
+      await choose(h.act, LYNX);
+      field("title").value = "Author A private draft";
+      await saveDraft(h.act);
+      await waitFor(h.act, () => finishWrite !== undefined);
+
+      rows = [draftRow(5, { title: "Author B draft" })];
+      await h.act(async () => {
+        if (nextUser) grant(h.qc, nextUser);
+        else h.qc.bindBrowserQueryCacheToUser(null);
+      });
+      if (nextUser) {
+        await waitFor(h.act, () => text(draftRegion()).includes("Author B draft"));
+        assert.equal(field("title").value, "");
+        assert.equal(document.getElementById("report-species").value, "");
+      } else {
+        assert.equal(draftForm(), null);
+      }
+
+      // The original request can commit even though its UI session has ended.
+      await h.act(async () => { finishWrite({ data: persistedDraft(writes[0]), error: null }); });
+      assert.equal(writes.length, 1);
+      assert.doesNotMatch(text(document.body), /Author A private draft|Draft saved|Could not save draft/);
+      assert.equal(h.client.getQueryData(ownDraftKey("user-a")), undefined);
+      if (nextUser) assert.deepEqual([...h.client.getQueryData(ownDraftKey(nextUser))], rows);
+    }, () => readDrafts(rows), ({ payload }) => new Promise((resolve) => {
+      writes.push(payload);
+      finishWrite = resolve;
+    }));
+  });
+}
+
+test("Reports stops before INSERT when the account switches during session token lookup", async () => {
+  let finishSession;
+  const writes = [];
+  await runDom(async (h) => {
+    await mountReports(h);
+    await choose(h.act, LYNX);
+    field("title").value = "Author A private draft";
+    h.database.client.auth.getSession = () => new Promise((resolve) => { finishSession = resolve; });
+    await saveDraft(h.act);
+    await waitFor(h.act, () => finishSession !== undefined);
+    await h.act(async () => { grant(h.qc, "user-b"); });
+    await h.act(async () => {
+      finishSession({ data: { session: { user: { id: "user-b" }, access_token: "token-user-b" } }, error: null });
+    });
+    assert.equal(writes.length, 0);
+    assert.equal(field("title").value, "");
+    assert.doesNotMatch(text(document.body), /Author A private draft|Draft saved|Could not save draft/);
+  }, () => readDrafts(), (request) => { writes.push(request); });
+});
+
 test("Reports lists ordered draft pages with nullable fields and keeps the subject selector usable", async () => {
   const requests = [];
   const recent = draftRow(1, { updated_at: "2026-11-09T13:00:00+01:00" });
@@ -397,7 +746,6 @@ test("Reports distinguishes database and payload failures from an empty list and
 
 test("Reports waits for verified access and drops prior drafts and late results across account changes", async () => {
   const requests = [];
-  const ownDraftKey = (user) => ["auth-user", user, "reports", "own-drafts"];
   let loadPage = () => Promise.resolve({ data: [draftRow(1, { title: "Author A draft" })], error: null });
   await runDom(async (h) => {
     const { act, client, qc, root } = h;
