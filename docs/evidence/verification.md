@@ -209,3 +209,22 @@ Assistant MVP (local): PASS for principal functional tests; PASS for Stop/recove
 Observations: Species retrieval, Open-Meteo retrieval, multi-source reasoning, contextual follow-ups and basic session isolation passed in local browser tests. Cancellation exposed minor UI-state defects. Account switching during active streaming was not tested.
 
 Conclusion: The local Assistant MVP is functional and has passed the principal conversational, retrieval and basic session-isolation tests. Remaining issues concern deployment-specific verification gaps. Full Section 7 implementation is intentionally deferred.
+
+----
+### Step 4.6 — Report Draft Editing: Verification limitations
+
+**Date:** 11 November 2026  
+**Environment:** Local development
+
+**Independent review:** PASS after correction and independent reproduction of the stale-draft reopening and whitespace-only title defects.
+
+**Automated tests:** 72 DOM/authentication tests and 32 specimen/cache-isolation tests passed.
+
+**Manual observations:**
+- Cross-author draft isolation through My drafts: PASS — another user's drafts were not accessible through the UI.
+- Full network interruption: Authentication.exe suspended protected access. Unsaved editor inputs were lost.
+- Failed UPDATE with authentication remaining valid: NOT TESTED manually; automated regression coverage exists.
+- Direct cross-author and non-draft UPDATE denial: NOT TESTED live; RLS reviewed and denial behaviour mock-tested.
+- Specimen-linked editing: NOT TESTED live; no specimen fixtures available.
+
+**Conclusion:** Independent code review passed. The remaining negative-path verification gaps and offline editor behaviour are documented under REPORT-VERIFY-01 in `docs/planning/TODO.md`. These are deferred and do not independently invalidate the Step 4.6 code-review verdict.

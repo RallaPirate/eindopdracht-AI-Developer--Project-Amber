@@ -51,6 +51,21 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   - Test using mocked authentication failures or controlled network failure scenarios.
   - Actual incident resolved after Supabase resumed.
 
+  ### REPORT-VERIFY-01 — Deferred live verification of report draft editing
+
+**Applies to:** Step 4.6 — Report Draft Editing.
+
+**Priority:** Low — deferred, non-blocking.
+
+- [ ] Test a failed report UPDATE while authentication remains verified. Confirm that unsaved inputs survive and retry succeeds.
+- [ ] Investigate the loss of unsaved editor input during full network disconnection. Coordinate with existing AUTH-01; do not weaken authentication or protected-data safeguards.
+- [ ] Verify direct authenticated UPDATE denial for another author's draft and for non-draft reports, using disposable test records. Confirm that rejected operations leave stored data unchanged.
+- [ ] Verify specimen-linked editing against live Supabase when a suitable fixture exists.
+
+**Background:** During local Step 4.6 testing on 11 November 2026, taking the browser fully offline caused Authentication.exe to suspend protected access and the editor's unsaved changes were lost. This did not isolate a failed UPDATE under an otherwise verified session. Cross-author draft visibility was checked through the UI, but direct unauthorised UPDATE attempts were not performed.
+
+**Completion criterion:** Outstanding scenarios are verified and recorded in `docs/evidence/verification.md`, with any confirmed defects addressed separately.
+
 ## Notes
 
 - These items are not automatically blockers.

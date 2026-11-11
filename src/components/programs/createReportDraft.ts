@@ -32,7 +32,7 @@ export const newReportDraftSchema = z.object({
   body: optionalText,
 });
 
-type NewReportDraft = z.output<typeof newReportDraftSchema>;
+export type NewReportDraft = z.output<typeof newReportDraftSchema>;
 
 const persistedDraftSchema = reportDraftSchema.extend({
   created_by: z.guid(),
@@ -57,11 +57,11 @@ export function validateDraftSubject(
   }
 }
 
-export async function createReportDraft(
+export async function withReportDraftSession<T>(
   supabase: SupabaseClient,
-  draft: NewReportDraft,
   { userId }: AuthenticatedMutationContext,
-): Promise<ReportDraft> {
+  request: (accessToken: string) => PromiseLike<T>,
+): Promise<T> {
   const epoch = getVerifiedAuthSnapshot().accessEpoch;
   const { data: { session }, error } = await supabase.auth.getSession();
   const current = getVerifiedAuthSnapshot();
@@ -74,8 +74,15 @@ export async function createReportDraft(
   if (error || session?.user.id !== userId || !session.access_token) {
     return unwrapAppResult(err("unauthenticated"));
   }
+  return request(session.access_token);
+}
 
-  const response = await supabase
+export async function createReportDraft(
+  supabase: SupabaseClient,
+  draft: NewReportDraft,
+  context: AuthenticatedMutationContext,
+): Promise<ReportDraft> {
+  const response = await withReportDraftSession(supabase, context, (accessToken) => supabase
     .from("reports")
     .insert({
       species_id: draft.species_id,
@@ -88,7 +95,7 @@ export async function createReportDraft(
     .single()
     // Bind this request to its original session even if the shared client
     // resolves a different default token before the POST goes out.
-    .setHeader("Authorization", `Bearer ${session.access_token}`);
+    .setHeader("Authorization", `Bearer ${accessToken}`));
   const persisted = persistedDraftSchema.safeParse(
     unwrapAppResult(fromSupabaseSingleResult(response)),
   );

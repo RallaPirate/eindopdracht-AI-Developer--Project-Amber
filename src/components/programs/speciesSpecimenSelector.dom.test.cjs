@@ -75,9 +75,9 @@ function installDom() {
   };
 }
 
-function createDatabase(readDraftPage, writeDraft) {
+function createDatabase(readDraftPage, writeDraft, { readDetail, updateDraft }) {
   let readError = null;
-  let defer = false;
+  let shouldDefer = () => false;
   const waiting = [];
   const calls = [];
   function respond(table, speciesId, rows) {
@@ -85,7 +85,7 @@ function createDatabase(readDraftPage, writeDraft) {
     const payload = () => (readError
       ? { data: null, error: readError }
       : { data: rows.map((row) => ({ ...row })), error: null });
-    if (!defer) return Promise.resolve(payload());
+    if (!shouldDefer(table)) return Promise.resolve(payload());
     return new Promise((resolve) => {
       waiting.push((override) => resolve(override ?? payload()));
     });
@@ -108,11 +108,20 @@ function createDatabase(readDraftPage, writeDraft) {
               },
             };
           },
+          update(payload) { request.payload = { ...payload }; return query; },
           select(columns) { request.columns = columns; return query; },
           eq(...filter) { request.filters.push(filter); return query; },
           order(column, { ascending }) { request.orders.push([column, ascending]); return query; },
           range(...range) { request.range = range; return query; },
-          abortSignal(signal) { return readDraftPage({ ...request, signal }); },
+          abortSignal(signal) {
+            request.signal = signal;
+            return request.range ? readDraftPage(request) : query;
+          },
+          maybeSingle() {
+            return request.payload ? {
+              setHeader: (name, value) => updateDraft({ ...request, headers: { [name]: value } }),
+            } : readDetail(request);
+          },
         };
         return query;
       }
@@ -156,7 +165,7 @@ function createDatabase(readDraftPage, writeDraft) {
     calls,
     waiting,
     failReads(error) { readError = error; },
-    deferReads(next) { defer = next; },
+    deferReads(next, onlyTable) { shouldDefer = (table) => next && (!onlyTable || table === onlyTable); },
     releaseNext(override) {
       const resolve = waiting.shift();
       assert.ok(resolve, "no deferred read");
@@ -243,13 +252,13 @@ async function setSelect(act, element, value) {
   });
 }
 
-async function runDom(fn, readDraftPage, writeDraft) {
+async function runDom(fn, readDraftPage, writeDraft, edits = {}) {
   const installed = installDom();
   const React = require("react");
   const { createRoot } = require("react-dom/client");
   const { act } = React;
   const { QueryClientProvider } = require("@tanstack/react-query");
-  const database = createDatabase(readDraftPage, writeDraft);
+  const database = createDatabase(readDraftPage, writeDraft, edits);
   const load = loadGraph(database);
   const qc = load("@/lib/queryClient");
   database.client.auth = {
@@ -880,5 +889,473 @@ test("a late specimen response cannot restore an earlier species or session", as
     assert.equal(document.getElementById("report-specimen").disabled, true);
     assert.ok(emissions.slice(marker).every((entry) => entry.specimenId !== ASH));
     assert.deepEqual(emissions.at(-1), { speciesId: null, specimenId: null });
+  });
+});
+
+const detailKey = (user, id) => ["auth-user", user, "reports", "draft-detail", id];
+const editFilters = (id) => [["id", id], ["review_status", "draft"], ["record_status", "active"]];
+const editColumns = "id, title, report_type, species_id, updated_at, specimen_id, body, review_status, record_status";
+
+function detailRow(index, fields = {}) {
+  return draftRow(index, { specimen_id: null, body: null, review_status: "draft", record_status: "active", ...fields });
+}
+
+async function openDraft({ act }, label, expectForm = true) {
+  await waitFor(act, () => buttonByText(label) !== null);
+  await act(async () => { buttonByText(label).click(); });
+  if (expectForm) await waitFor(act, () => buttonByText("Save changes") !== null);
+}
+
+test("Reports requires a successful fresh read after rapidly reopening a cached draft", async () => {
+  const { flushSync } = require("react-dom");
+  let a = detailRow(1, { title: "Draft A", body: "Obsolete A body" });
+  const b = detailRow(2, { title: "Draft B", body: "Private B body" });
+  const key = detailKey("user-a", a.id);
+  const reads = [];
+  const writes = [];
+  let defer = false;
+
+  await runDom(async (h) => {
+    h.client.setQueryDefaults(key, { staleTime: 60_000 });
+    await mountReports(h);
+    await openDraft(h, a.title);
+    await waitFor(h.act, () => !buttonByText("Save changes").disabled);
+    assert.equal(field("body").value, "Obsolete A body");
+
+    a = { ...a, body: "New server body for A" };
+    defer = true;
+    await h.act(async () => {
+      // Commit both selections before the zero-delay cache GC can run.
+      flushSync(() => { buttonByText(b.title).click(); });
+      assert.equal(buttonByText(b.title).getAttribute("aria-current"), "true");
+      assert.equal(h.client.getQueryData(key).body, "Obsolete A body");
+      flushSync(() => { buttonByText(a.title).click(); });
+    });
+    await waitFor(h.act, () => reads.length === 2);
+    assert.deepEqual(reads.map(({ id }) => id), [b.id, a.id]);
+    assert.equal(reads[0].signal.aborted, true);
+    assert.equal(h.client.getQueryData(key).body, "Obsolete A body");
+    const cachedQuery = h.client.getQueryCache().find({ queryKey: key });
+    assert.equal(cachedQuery.options.staleTime, 60_000);
+    assert.equal(cachedQuery.isStaleByTime(60_000), false);
+    assert.match(text(document.body), /Loading draft…/);
+    assert.equal(draftForm(), null);
+    assert.equal(buttonByText("Save changes"), null);
+
+    await h.act(async () => {
+      reads[0].resolve({ data: b, error: null });
+      reads[1].resolve({ data: null, error: READ_FAILURE });
+    });
+    await waitFor(h.act, () => buttonByText("Retry draft") !== null);
+    assert.equal(h.client.getQueryData(key).body, "Obsolete A body");
+    assert.equal(draftForm(), null);
+    assert.equal(buttonByText("Save changes"), null);
+
+    await h.act(async () => { buttonByText("Retry draft").click(); });
+    await waitFor(h.act, () => reads.length === 3);
+    assert.equal(draftForm(), null);
+    await h.act(async () => { reads[2].resolve({ data: a, error: null }); });
+    await waitFor(h.act, () => buttonByText("Save changes")?.disabled === false);
+    assert.equal(field("body").value, "New server body for A");
+
+    const editor = draftForm();
+    field("title").value = "Only the title changed";
+    await h.act(async () => { void h.client.invalidateQueries({ queryKey: key }); });
+    await waitFor(h.act, () => reads.length === 4);
+    await h.act(async () => {
+      reads[3].resolve({ data: { ...a, updated_at: "2026-03-15T14:31:00Z" }, error: null });
+    });
+    await waitFor(h.act, () => h.client.getQueryState(key).fetchStatus === "idle");
+    assert.equal(draftForm(), editor);
+    assert.equal(field("title").value, "Only the title changed");
+    assert.equal(field("body").value, "New server body for A");
+
+    await h.act(async () => { buttonByText("Save changes").click(); });
+    await waitFor(h.act, () => text(draftForm()).includes("Changes saved."));
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].title, "Only the title changed");
+    assert.equal(writes[0].body, "New server body for A");
+
+    await waitFor(h.act, () => reads.length === 5);
+    await h.act(async () => { grant(h.qc, "user-b"); });
+    assert.equal(reads[4].signal.aborted, true);
+    await h.act(async () => { reads[4].resolve({ data: a, error: null }); });
+    assert.equal(field("body").value, "");
+    assert.equal(buttonByText("Save changes"), null);
+    assert.equal(h.client.getQueryData(key), undefined);
+    assert.equal(h.client.getQueryData(detailKey("user-b", a.id)), undefined);
+  }, () => readDrafts([a, b]), undefined, {
+    readDetail({ filters, signal }) {
+      const id = filters[0][1];
+      return defer ? new Promise((resolve) => reads.push({ id, signal, resolve })) : readDrafts(a);
+    },
+    updateDraft({ payload }) {
+      writes.push(payload);
+      a = { ...a, ...payload };
+      return readDrafts(a);
+    },
+  });
+});
+
+test("My drafts labels a whitespace-only title without changing the stored or normal titles", async () => {
+  const blank = detailRow(1, { title: "\t\n" });
+  const normal = draftRow(2, { title: "  Visible title  " });
+  await runDom(async (h) => {
+    await mountReports(h);
+    await waitFor(h.act, () => draftRegion().querySelectorAll("button").length === 2);
+    assert.ok(buttonByText("Untitled draft"));
+    assert.ok(buttonByText(normal.title));
+    assert.equal(h.client.getQueryData(ownDraftKey("user-a"))[0].title, blank.title);
+    await openDraft(h, "Untitled draft");
+    assert.equal(field("title").value, blank.title);
+  }, () => readDrafts([blank, normal]), undefined, { readDetail: () => readDrafts(blank) });
+});
+
+test("Reports loads, saves and synchronises a full edit while cancelling pre-save reads", async () => {
+  const original = detailRow(2, { specimen_id: ASH, title: "Ash's draft", body: "First\r\nSecond\r" });
+  const other = draftRow(1);
+  const newTime = "2026-03-15T14:30:45.123457Z";
+  const reads = { list: [], detail: [] };
+  const writes = [];
+  let defer = false;
+  function read(kind, request, data) {
+    assert.ok(request.signal instanceof AbortSignal);
+    return defer ? new Promise((resolve) => reads[kind].push({ ...request, resolve })) : readDrafts(data);
+  }
+
+  await runDom(async (h) => {
+    await mountReports(h);
+    await openDraft(h, original.title);
+    await waitFor(h.act, () => !buttonByText("Save changes").disabled);
+    assert.equal(document.getElementById("report-species").value, LYNX);
+    assert.equal(document.getElementById("report-specimen").value, ASH);
+    assert.equal(field("report_type").value, "care");
+    assert.equal(field("title").value, original.title);
+    assert.equal(field("body").value, "First\nSecond\n");
+    assert.equal(document.querySelectorAll("form").length, 1);
+
+    field("title").value = "  Ash updated  ";
+    defer = true;
+    await h.act(async () => { void h.client.invalidateQueries({ queryKey: detailKey("user-a", original.id) }); });
+    await waitFor(h.act, () => reads.detail.length === 1);
+    await h.act(async () => {
+      reads.detail.shift().resolve({ data: { ...original, body: "Earlier background snapshot" }, error: null });
+    });
+    assert.equal(field("title").value, "  Ash updated  ");
+    assert.equal(field("body").value, "First\nSecond\n");
+
+    await h.act(async () => {
+      void h.client.invalidateQueries({ queryKey: ownDraftKey("user-a") });
+      void h.client.invalidateQueries({ queryKey: detailKey("user-a", original.id) });
+    });
+    await waitFor(h.act, () => reads.detail.length === 1 && reads.list.length === 1);
+    field("report_type").value = "medical";
+    await h.act(async () => {
+      buttonByText("Save changes").click();
+      buttonByText("Save changes").click();
+      buttonByText(other.title).click();
+      buttonByText("Back to new draft").click();
+    });
+    await waitFor(h.act, () => writes.length === 1 && buttonByText("Back to new draft").disabled);
+    assert.match(text(draftForm()), /Saving changes/);
+    const [{ request, resolve }] = writes;
+    assert.equal(request.table, "reports");
+    assert.equal(request.columns, editColumns);
+    assert.deepEqual(request.filters, editFilters(original.id));
+    assert.deepEqual(request.headers, { Authorization: "Bearer token-user-a" });
+    assert.deepEqual(request.payload, {
+      species_id: LYNX, specimen_id: ASH, report_type: "medical", title: "  Ash updated  ", body: original.body,
+    });
+
+    const saved = { ...original, ...request.payload, updated_at: newTime };
+    await h.act(async () => { resolve({ data: saved, error: null }); });
+    await waitFor(h.act, () => text(draftForm()).includes("Changes saved."));
+    for (const [kind, stale] of [["list", [other, original]], ["detail", original]]) {
+      assert.equal(reads[kind].length, 2);
+      assert.equal(reads[kind][0].signal.aborted, true);
+      await h.act(async () => { reads[kind][0].resolve({ data: stale, error: null }); });
+    }
+    const first = draftRegion().querySelector("li");
+    assert.match(text(first), /Ash updated.*medical/s);
+    assert.equal(first.querySelector("time").dateTime, newTime);
+    assert.equal(field("title").value, saved.title);
+    assert.equal(field("report_type").value, "medical");
+    assert.equal(h.client.getQueryData(detailKey("user-a", original.id)).title, saved.title);
+    await h.act(async () => {
+      reads.list[1].resolve({ data: [other, saved], error: null });
+      reads.detail[1].resolve({ data: saved, error: null });
+      buttonByText("Back to new draft").click();
+    });
+    assert.equal(field("title").value, "");
+    assert.equal(writes.length, 1);
+  }, (request) => read("list", request, [other, original]), undefined, {
+    readDetail(request) {
+      assert.deepEqual(request.filters, editFilters(original.id));
+      assert.equal(request.columns, editColumns);
+      return read("detail", request, original);
+    },
+    updateDraft: (request) => new Promise((resolve) => writes.push({ request, resolve })),
+  });
+});
+
+test("Reports ignores a late detail after switching and distinguishes retryable failures and missing drafts", async () => {
+  const a = detailRow(1, { title: "First draft", body: "Private first body" });
+  const b = detailRow(2, { title: null, report_type: null });
+  const reads = [];
+  await runDom(async (h) => {
+    await mountReports(h);
+    await openDraft(h, a.title, false);
+    await waitFor(h.act, () => reads.length === 1);
+    assert.match(text(document.body), /Loading draft…/);
+    assert.equal(draftForm(), null);
+    await openDraft(h, "Untitled draft", false);
+    await waitFor(h.act, () => reads.length === 2);
+    assert.equal(reads[0].signal.aborted, true);
+    await h.act(async () => {
+      reads[0].resolve({ data: a, error: null });
+      reads[1].resolve({ data: null, error: READ_FAILURE });
+    });
+    await waitFor(h.act, () => buttonByText("Retry draft") !== null);
+    assert.match(text(document.body), /Could not load draft.*Unable to complete the database operation/);
+    assert.doesNotMatch(text(document.body), /secret|Private first body|no longer available/);
+    assert.equal(draftForm(), null);
+    assert.equal(h.client.getQueryData(detailKey("user-a", a.id)), undefined);
+
+    await h.act(async () => { buttonByText("Retry draft").click(); });
+    await waitFor(h.act, () => reads.length === 3);
+    await h.act(async () => { reads[2].resolve({ data: a, error: null }); });
+    await waitFor(h.act, () => buttonByText("Retry draft") !== null);
+    assert.equal(draftForm(), null, "a mismatched response ID cannot open the editor");
+    await h.act(async () => { buttonByText("Retry draft").click(); });
+    await waitFor(h.act, () => reads.length === 4);
+    await h.act(async () => { reads[3].resolve({ data: null, error: null }); });
+    await waitFor(h.act, () => text(document.body).includes("This draft is no longer available."));
+    assert.equal(draftForm(), null);
+    assert.equal(buttonByText("Retry draft"), null);
+
+    await h.act(async () => { buttonByText("Back to new draft").click(); });
+    assert.ok(buttonByText("Save draft"));
+  }, () => readDrafts([a, b]), undefined, {
+    readDetail: (request) => new Promise((resolve) => reads.push({ ...request, resolve })),
+  });
+});
+
+test("Reports preserves a linked specimen during a failed load and requires deliberate resolution", async () => {
+  const original = detailRow(1, { specimen_id: ASH });
+  let updated;
+  await runDom(async (h) => {
+    await mountReports(h);
+    h.database.deferReads(true, "specimens");
+    await openDraft(h, original.title);
+    await waitFor(h.act, () => h.database.waiting.length === 1);
+    assert.equal(document.getElementById("report-specimen").value, ASH);
+    assert.equal(buttonByText("Save changes").disabled, true);
+    assert.match(text(draftForm()), /Loading specimens/);
+    h.database.deferReads(false);
+    h.database.failReads(READ_FAILURE);
+    await h.act(async () => { h.database.releaseNext({ data: null, error: READ_FAILURE }); });
+    await waitFor(h.act, () => buttonByText("Retry specimen list") !== null);
+    assert.equal(document.getElementById("report-specimen").value, ASH);
+    assert.equal(buttonByText("Save changes").disabled, true);
+
+    // A successful but stale or empty list must not turn the stored link into NULL.
+    h.database.failReads(null);
+    h.database.deferReads(true, "specimens");
+    await h.act(async () => { buttonByText("Retry specimen list").click(); });
+    await waitFor(h.act, () => h.database.waiting.length === 1);
+    await h.act(async () => { h.database.releaseNext({ data: [], error: null }); });
+    await waitFor(h.act, () => buttonByText("Retry specimen list")?.disabled === false);
+    assert.equal(document.getElementById("report-specimen").value, ASH);
+    assert.equal(buttonByText("Save changes").disabled, true);
+    assert.match(text(draftForm()), /selected specimen could not be verified/);
+    assert.equal(updated, undefined);
+
+    h.database.deferReads(false);
+    await h.act(async () => { buttonByText("Retry specimen list").click(); });
+    await waitFor(h.act, () => !buttonByText("Save changes").disabled);
+    assert.equal(document.getElementById("report-specimen").value, ASH);
+    await choose(h.act, FERN);
+    assert.equal(document.getElementById("report-specimen").value, "");
+    await waitFor(h.act, () => !buttonByText("Save changes").disabled);
+    await h.act(async () => { buttonByText("Save changes").click(); });
+    await waitFor(h.act, () => text(draftForm()).includes("Changes saved."));
+    assert.equal(updated.species_id, FERN);
+    assert.equal(updated.specimen_id, null);
+  }, () => readDrafts([updated ?? original]), undefined, {
+    readDetail: () => readDrafts(updated ?? original),
+    updateDraft({ payload }) {
+      updated = { ...original, ...payload };
+      return readDrafts(updated);
+    },
+  });
+});
+
+test("Reports keeps nullable edit fields and unsaved text through unconfirmed UPDATEs", async () => {
+  const original = detailRow(1, { title: null, report_type: null });
+  const writes = [];
+  const failures = [
+    [() => ({ data: null, error: null }), /no longer available/],
+    [() => ({ data: null, error: { code: "42501", message: "private policy" } }), /no longer available/],
+    [() => ({ data: null, error: READ_FAILURE }), /Unable to complete the database operation/],
+    [() => ({ data: null, error: { code: "23503", message: "private FK error" } }), /provided input is invalid/],
+    [(row) => ({ data: { ...row, review_status: "submitted" }, error: null }), /database operation/],
+    [(row) => ({ data: { ...row, body: "Wrong returned text" }, error: null }), /database operation/],
+    [(row) => ({ data: { ...row, id: detailRow(8).id }, error: null }), /database operation/],
+    [(row) => ({ data: { ...row, updated_at: "invalid" }, error: null }), /database operation/],
+  ];
+  let saved;
+  let finishFailedWrite;
+  await runDom(async (h) => {
+    await mountReports(h, "senior");
+    await openDraft(h, "Untitled draft");
+    assert.equal(field("title").value, "");
+    assert.equal(field("body").value, "");
+    assert.equal(field("report_type").value, "");
+    assert.equal(document.getElementById("report-specimen").value, "");
+    await waitFor(h.act, () => !buttonByText("Save changes").disabled);
+    field("title").value = "   ";
+    field("body").value = "\t\n";
+
+    for (const [index, [, message]] of failures.entries()) {
+      await h.act(async () => { buttonByText("Save changes").click(); });
+      await waitFor(h.act, () => writes.length === index + 1 && buttonByText("Save changes").disabled);
+      await h.act(async () => { finishFailedWrite(); });
+      await waitFor(h.act, () => text(draftForm()).includes("Could not save changes"));
+      assert.match(text(draftForm()), /Could not save changes/);
+      assert.match(text(draftForm()), message);
+      assert.doesNotMatch(text(draftForm()), /Changes saved|private|secret/);
+      assert.equal(field("body").value, "\t\n");
+      assert.equal(field("title").value, "   ");
+      assert.equal(h.client.getQueryData(detailKey("user-a", original.id)).body, null);
+    }
+
+    field("body").value = "";
+    await h.act(async () => { buttonByText("Save changes").click(); });
+    await waitFor(h.act, () => text(draftForm()).includes("Changes saved."));
+    const nullable = { species_id: LYNX, specimen_id: null, report_type: null, title: null, body: null };
+    assert.deepEqual(writes, [...failures.map(() => ({ ...nullable, body: "\t\n" })), nullable]);
+  }, () => readDrafts([saved ?? original]), undefined, {
+    readDetail: () => readDrafts(saved ?? original),
+    updateDraft({ payload }) {
+      const failure = failures[writes.length];
+      writes.push(payload);
+      const row = { ...original, ...payload };
+      if (failure) return new Promise((resolve) => { finishFailedWrite = () => resolve(failure[0](row)); });
+      saved = row;
+      return readDrafts(saved);
+    },
+  });
+});
+
+test("Mocked report policies deny other authors' drafts across all roles and edit filters exclude later states", async () => {
+  const foreign = detailRow(1, { author: "user-b" });
+  const submitted = detailRow(2, { author: "user-a", review_status: "submitted" });
+  const reviewed = detailRow(3, { author: "user-a", review_status: "reviewed" });
+  const own = detailRow(4, { author: "user-a" });
+  const rows = [foreign, submitted, reviewed, own];
+  let access;
+  function visible(request) {
+    // Simulated RLS. Other policies can expose submitted/reviewed rows for reads.
+    return rows.find((row) => request.filters.every(([key, value]) => row[key] === value)
+      && (row.review_status !== "draft" || row.author === access.userId)) ?? null;
+  }
+  await runDom(async ({ qc, load, database }) => {
+    const { fetchReportDraftDetail, updateReportDraft } = load("./editReportDraft.ts");
+    const context = { userId: "user-a" };
+    const input = { species_id: LYNX, specimen_id: null, report_type: null, title: null, body: null };
+    for (const role of ["employee", "senior", "management"]) {
+      grant(qc, context.userId, role);
+      access = qc.getVerifiedAuthSnapshot();
+      assert.equal(access.role, role);
+      for (const blocked of [foreign, submitted, reviewed]) {
+        assert.equal(await fetchReportDraftDetail(database.client, blocked.id, new AbortController().signal), null);
+        await assert.rejects(updateReportDraft(database.client, blocked.id, input, context), { code: "not_found" });
+      }
+      assert.equal((await fetchReportDraftDetail(database.client, own.id, new AbortController().signal)).id, own.id);
+      assert.equal((await updateReportDraft(database.client, own.id, input, context)).id, own.id);
+    }
+  }, undefined, undefined, {
+    readDetail: (request) => readDrafts(visible(request)),
+    updateDraft(request) {
+      const row = visible(request);
+      return readDrafts(row ? { ...row, ...request.payload } : null);
+    },
+  });
+});
+
+for (const transition of ["logout", "account switch", "permission change"]) {
+  test(`Reports discards pending edit reads, writes and input on ${transition}`, async () => {
+    const original = detailRow(1, { body: "Private author body" });
+    const reads = [];
+    let finishWrite;
+    let defer = false;
+    let list = [original];
+    await runDom(async (h) => {
+      await mountReports(h);
+      await openDraft(h, original.title);
+      await waitFor(h.act, () => !buttonByText("Save changes").disabled);
+      field("body").value = "Pending private edit";
+      defer = true;
+      await h.act(async () => {
+        void h.client.invalidateQueries({ queryKey: detailKey("user-a", original.id) });
+        buttonByText("Save changes").click();
+      });
+      await waitFor(h.act, () => finishWrite !== undefined && reads.length === 1);
+      list = [];
+      await h.act(async () => {
+        if (transition === "logout") h.qc.bindBrowserQueryCacheToUser(null);
+        else if (transition === "account switch") grant(h.qc, "user-b");
+        else grant(h.qc, "user-a", "management");
+      });
+      assert.equal(buttonByText("Save changes"), null);
+      assert.equal(reads[0].signal.aborted, true);
+      assert.doesNotMatch(text(document.body), /Private author body|Pending private edit/);
+      if (transition === "logout") assert.equal(draftForm(), null);
+      else assert.equal(field("body").value, "");
+
+      await h.act(async () => {
+        reads[0].resolve({ data: original, error: null });
+        finishWrite();
+      });
+      assert.doesNotMatch(text(document.body), /Private author body|Pending private edit|Changes saved/);
+      assert.equal(h.client.getQueryData(detailKey("user-a", original.id)), undefined);
+      assert.equal(h.client.getQueryData(detailKey("user-b", original.id)), undefined);
+      if (transition !== "logout") {
+        const user = transition === "account switch" ? "user-b" : "user-a";
+        await waitFor(h.act, () => text(draftRegion()).includes("No drafts yet."));
+        assert.equal(h.client.getQueryData(ownDraftKey(user)).length, 0);
+      }
+    }, () => readDrafts(list), undefined, {
+      readDetail: ({ signal }) => defer
+        ? new Promise((resolve) => reads.push({ signal, resolve }))
+        : readDrafts(original),
+      updateDraft: ({ payload }) => new Promise((resolve) => {
+        finishWrite = () => resolve({ data: { ...original, ...payload }, error: null });
+      }),
+    });
+  });
+}
+
+test("Reports prevents UPDATE if the access epoch changes during token lookup for the same user", async () => {
+  const original = detailRow(1);
+  let finishSession;
+  let updates = 0;
+  await runDom(async (h) => {
+    await mountReports(h);
+    await openDraft(h, original.title);
+    await waitFor(h.act, () => !buttonByText("Save changes").disabled);
+    h.database.client.auth.getSession = () => new Promise((resolve) => { finishSession = resolve; });
+    await h.act(async () => { buttonByText("Save changes").click(); });
+    await waitFor(h.act, () => finishSession !== undefined);
+    await h.act(async () => {
+      grant(h.qc, "user-a", "management");
+      finishSession({ data: { session: { user: { id: "user-a" }, access_token: "old-token" } }, error: null });
+    });
+    assert.equal(updates, 0);
+    assert.equal(buttonByText("Save changes"), null);
+    assert.equal(field("title").value, "");
+  }, () => readDrafts([original]), undefined, {
+    readDetail: () => readDrafts(original),
+    updateDraft: () => { updates++; return readDrafts(); },
   });
 });

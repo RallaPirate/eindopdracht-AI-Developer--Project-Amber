@@ -24,8 +24,10 @@ const CONTROL_CLASS =
   "os-bevel-in mt-1 block w-full bg-[var(--os-input-bg)] px-2 py-1 font-sans text-sm text-black outline-none disabled:text-[var(--os-disabled)]";
 
 type SpeciesSpecimenSelectorProps = {
-  /** Called after the selection changes, including when a list clears an invalid specimen. */
-  onChange?: (selection: SubjectSelection) => void;
+  /** Mount a new selector for each edited draft and authentication lifetime. */
+  initialSelection?: SubjectSelection;
+  /** Edit mode also reports whether the current subject appears in the loaded lists. */
+  onChange?: (selection: SubjectSelection, subjectAvailable: boolean) => void;
 };
 
 function retryQuery(refetch: () => Promise<unknown>) {
@@ -49,9 +51,9 @@ function RetrievalFailure({
   );
 }
 
-export function SpeciesSpecimenSelector({ onChange }: SpeciesSpecimenSelectorProps) {
+export function SpeciesSpecimenSelector({ initialSelection, onChange }: SpeciesSpecimenSelectorProps) {
   const access = useVerifiedAuthSnapshot();
-  const [selection, setSelection] = useState<SubjectSelection>(EMPTY_SUBJECT_SELECTION);
+  const [selection, setSelection] = useState(initialSelection ?? EMPTY_SUBJECT_SELECTION);
   const [session, setSession] = useState({
     userId: access.userId,
     accessEpoch: access.accessEpoch,
@@ -95,10 +97,9 @@ export function SpeciesSpecimenSelector({ onChange }: SpeciesSpecimenSelectorPro
   const response = speciesId !== null && specimensQuery.data
     ? { speciesId, specimens: specimensQuery.data }
     : null;
-  const reconciled = reduceReportSubject(activeSelection, {
-    type: "records",
-    species,
-    response,
+  // In the editor, only explicit input may change a persisted subject.
+  const reconciled = initialSelection ? activeSelection : reduceReportSubject(activeSelection, {
+    type: "records", species, response,
   });
   if (
     !sessionChanged && (
@@ -113,9 +114,17 @@ export function SpeciesSpecimenSelector({ onChange }: SpeciesSpecimenSelectorPro
     onChangeRef.current = onChange;
   }, [onChange]);
 
+  const visibleSpecimens = speciesId && specimensQuery.data
+    ? filterSpecimensBySpecies(specimensQuery.data, speciesId)
+    : [];
+  const speciesAvailable = species?.some((entry) => entry.id === speciesId) ?? false;
+  const specimenId = activeSelection.specimenId;
+  const specimenAvailable = specimenId === null || visibleSpecimens.some((entry) => entry.id === specimenId);
+  const subjectAvailable = !initialSelection || (speciesAvailable && specimenAvailable);
+
   useEffect(() => {
-    onChangeRef.current?.(activeSelection);
-  }, [activeSelection]);
+    onChangeRef.current?.(activeSelection, subjectAvailable);
+  }, [activeSelection, subjectAvailable]);
 
   function onSpeciesChange(event: ChangeEvent<HTMLSelectElement>) {
     const nextId = event.target.value;
@@ -154,7 +163,7 @@ export function SpeciesSpecimenSelector({ onChange }: SpeciesSpecimenSelectorPro
   if (!species) {
     return speciesFailure;
   }
-  if (species.length === 0) {
+  if (species.length === 0 && !initialSelection) {
     return (
       <div className="flex flex-col gap-2">
         {speciesFailure}
@@ -163,20 +172,28 @@ export function SpeciesSpecimenSelector({ onChange }: SpeciesSpecimenSelectorPro
     );
   }
 
-  const visibleSpecimens = speciesId && specimensQuery.data
-    ? filterSpecimensBySpecies(specimensQuery.data, speciesId)
-    : [];
-  const specimenValue = visibleSpecimens.some((specimen) => specimen.id === activeSelection.specimenId)
-    ? activeSelection.specimenId ?? ""
-    : "";
+  const missingSpecies = !!initialSelection && speciesId !== null && !speciesAvailable;
+  const missingSpecimen = !!initialSelection && !specimenAvailable;
   const specimensReady = speciesId !== null && specimensQuery.data !== undefined;
   const specimensFailed = speciesId !== null && specimensQuery.isError;
   const specimensLoading = speciesId !== null && specimensQuery.isPending && !specimensQuery.data;
+  const noSpecimens = specimensReady && visibleSpecimens.length === 0 && !missingSpecimen;
 
   let specimenNote: ReactNode = null;
   if (specimensLoading) {
     specimenNote = <p>Loading specimens…</p>;
-  } else if (specimensReady && visibleSpecimens.length === 0) {
+  } else if (missingSpecimen) {
+    specimenNote = (
+      <div className="flex flex-col items-start gap-1">
+        <p role="alert">The selected specimen could not be verified. Retry or explicitly choose a different specimen or no specimen.</p>
+        {!specimensFailed ? (
+          <Win95Button disabled={specimensQuery.isFetching} onClick={() => retryQuery(specimensQuery.refetch)}>
+            Retry specimen list
+          </Win95Button>
+        ) : null}
+      </div>
+    );
+  } else if (noSpecimens) {
     specimenNote = (
       <p id="specimen-empty">
         No specimens are recorded for this species. A report can still cover the species.
@@ -191,33 +208,46 @@ export function SpeciesSpecimenSelector({ onChange }: SpeciesSpecimenSelectorPro
         Species
         <select
           id="report-species"
-          value={species.some((entry) => entry.id === activeSelection.speciesId) ? activeSelection.speciesId ?? "" : ""}
+          value={speciesAvailable || missingSpecies ? speciesId ?? "" : ""}
           onChange={onSpeciesChange}
           className={CONTROL_CLASS}
         >
           <option value="">Select a species</option>
+          {missingSpecies ? <option value={speciesId}>Selected species unavailable</option> : null}
           {species.map((entry) => (
             <option key={entry.id} value={entry.id}>{entry.display_name}</option>
           ))}
         </select>
       </label>
+      {initialSelection && speciesId === null ? <p>Choose a species to save changes.</p> : null}
+      {missingSpecies && !speciesQuery.isError ? (
+        <div className="flex flex-col items-start gap-1">
+          <p role="alert">Retry the species list or choose an available species.</p>
+          <Win95Button disabled={speciesQuery.isFetching} onClick={() => retryQuery(speciesQuery.refetch)}>
+            Retry species list
+          </Win95Button>
+        </div>
+      ) : null}
       <label htmlFor="report-specimen" className="block text-sm">
         Specimen
         <select
           id="report-specimen"
-          value={specimenValue}
-          disabled={speciesId === null || !specimensReady}
-          aria-describedby={specimensReady && visibleSpecimens.length === 0 ? "specimen-empty" : undefined}
+          value={specimenAvailable || missingSpecimen ? specimenId ?? "" : ""}
+          disabled={speciesId === null || (!specimensReady && !(missingSpecimen && specimensFailed))}
+          aria-describedby={noSpecimens ? "specimen-empty" : undefined}
           onChange={onSpecimenChange}
           className={CONTROL_CLASS}
         >
           <option value="">
             {specimensLoading
               ? "Loading specimens…"
-              : specimensFailed && !specimensReady
+              : specimensFailed && !specimensReady && !missingSpecimen
                 ? "Specimens unavailable"
                 : "No individual specimen"}
           </option>
+          {missingSpecimen ? (
+            <option value={specimenId}>{specimensLoading ? "Verifying selected specimen…" : "Selected specimen unavailable"}</option>
+          ) : null}
           {visibleSpecimens.map((specimen) => (
             <option key={specimen.id} value={specimen.id}>
               {specimenOptionLabel(specimen)}
