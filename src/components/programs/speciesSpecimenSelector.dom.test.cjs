@@ -75,7 +75,7 @@ function installDom() {
   };
 }
 
-function createDatabase(readDraftPage, writeDraft, { readDetail, updateDraft }) {
+function createDatabase(readDraftPage, writeDraft, { readDetail, updateDraft, deleteDraft }) {
   let readError = null;
   let shouldDefer = () => false;
   const waiting = [];
@@ -99,6 +99,7 @@ function createDatabase(readDraftPage, writeDraft, { readDetail, updateDraft }) 
             return {
               select(columns) {
                 return {
+                  abortSignal() { return this; },
                   single: () => ({
                     setHeader: (name, value) => writeDraft({
                       table, payload: { ...payload }, columns, headers: { [name]: value },
@@ -109,6 +110,8 @@ function createDatabase(readDraftPage, writeDraft, { readDetail, updateDraft }) 
             };
           },
           update(payload) { request.payload = { ...payload }; return query; },
+          delete() { request.method = "DELETE"; return query; },
+          setHeader(name, value) { return deleteDraft({ ...request, headers: { [name]: value } }); },
           select(columns) { request.columns = columns; return query; },
           eq(...filter) { request.filters.push(filter); return query; },
           order(column, { ascending }) { request.orders.push([column, ascending]); return query; },
@@ -174,14 +177,14 @@ function createDatabase(readDraftPage, writeDraft, { readDetail, updateDraft }) 
   };
 }
 
-function loadGraph(database) {
+function loadGraph(database, globals = {}) {
   const modules = new Map();
   function load(request, parent = path.join(root, "src/components/programs/entry.ts")) {
     if (request === "react" || request === "react/jsx-runtime" || request === "react-dom/client") {
       return require(request);
     }
     if (request === "@tanstack/react-query") return require(request);
-    if (request === "@/lib/supabase") {
+    if (database && request === "@/lib/supabase") {
       return { getSupabaseBrowserClient: () => database.client };
     }
     if (!request.startsWith(".") && !request.startsWith("@/")) return require(request);
@@ -202,7 +205,7 @@ function loadGraph(database) {
     }).outputText;
     const execute = vm.runInNewContext(
       `(function(require,module,exports){${compiled}\n})`,
-      { window, document, console, queueMicrotask },
+      { window, document, console, queueMicrotask, AbortController, ...globals },
       { filename: file },
     );
     execute((dependency) => load(dependency, file), loaded, loaded.exports);
@@ -906,6 +909,139 @@ async function openDraft({ act }, label, expectForm = true) {
   if (expectForm) await waitFor(act, () => buttonByText("Save changes") !== null);
 }
 
+async function clickReportButton({ act }, label) {
+  await act(async () => { buttonByText(label).click(); });
+}
+
+test("Reports confirms deletion once, cancels stale reads and immediately refreshes My drafts", async () => {
+  const a = detailRow(1, { title: "Draft A" });
+  const b = detailRow(2, { title: "Draft B" });
+  const listReads = [];
+  const detailReads = [];
+  const deletes = [];
+  let defer = false;
+  let finishDelete;
+  await runDom(async (h) => {
+    await mountReports(h);
+    assert.equal(buttonByText("Delete draft"), null);
+    await openDraft(h, a.title);
+    field("body").value = "Unsaved draft text";
+    await clickReportButton(h, "Delete draft");
+    assert.equal(deletes.length, 0);
+    await clickReportButton(h, "Cancel");
+    assert.equal(field("body").value, "Unsaved draft text");
+    assert.equal(deletes.length, 0);
+
+    await clickReportButton(h, "Delete draft");
+    await openDraft(h, b.title);
+    assert.equal(buttonByText("Confirm delete"), null);
+    await openDraft(h, a.title);
+    assert.equal(buttonByText("Confirm delete"), null);
+    defer = true;
+    await h.act(async () => {
+      void h.client.invalidateQueries({ queryKey: ownDraftKey("user-a") });
+      void h.client.invalidateQueries({ queryKey: detailKey("user-a", a.id) });
+    });
+    await waitFor(h.act, () => listReads.length === 1 && detailReads.length === 1);
+    await clickReportButton(h, "Delete draft");
+    await h.act(async () => {
+      const confirm = buttonByText("Confirm delete");
+      confirm.click();
+      confirm.click();
+    });
+    await waitFor(h.act, () => finishDelete && buttonByText("Save changes").disabled);
+    assert.equal(buttonByText(b.title).disabled, true);
+    assert.equal(buttonByText("Back to new draft").disabled, true);
+    await clickReportButton(h, b.title);
+    await clickReportButton(h, "Save changes");
+    assert.equal(deletes.length, 1);
+    assert.equal(deletes[0].method, "DELETE");
+    assert.deepEqual(deletes[0].filters, editFilters(a.id));
+    assert.equal(deletes[0].columns, "id");
+    assert.equal(deletes[0].headers.Authorization, "Bearer token-user-a");
+
+    await h.act(async () => { finishDelete({ data: [{ id: a.id }], error: null }); });
+    await waitFor(h.act, () => buttonByText("Save draft") && listReads.length === 2);
+    assert.equal(buttonByText(a.title), null);
+    assert.equal(buttonByText(b.title).disabled, false);
+    assert.equal(listReads[0].signal.aborted, true);
+    assert.equal(detailReads[0].signal.aborted, true);
+    assert.equal(buttonByText("Delete draft"), null);
+    assert.match(text(document.body), /Draft deleted\./);
+
+    await h.act(async () => {
+      listReads[1].resolve({ data: [b], error: null });
+      listReads[0].resolve({ data: [a, b], error: null });
+      detailReads[0].resolve({ data: a, error: null });
+    });
+    await waitFor(h.act, () => h.client.isFetching({ queryKey: ownDraftKey("user-a") }) === 0);
+    assert.equal(buttonByText(a.title), null);
+    assert.ok(h.client.getQueryData(detailKey("user-a", a.id)) == null);
+    await openDraft(h, b.title, false);
+    await waitFor(h.act, () => detailReads.some(({ filters }) => filters[0][1] === b.id));
+    await h.act(async () => {
+      detailReads.find(({ filters }) => filters[0][1] === b.id).resolve({ data: b, error: null });
+      for (const read of detailReads.filter(({ signal }) => signal.aborted)) {
+        read.resolve({ data: a, error: null });
+      }
+    });
+    await waitFor(h.act, () => buttonByText("Save changes") !== null);
+    assert.equal(field("title").value, b.title);
+  }, ({ signal }) => defer ? new Promise((resolve) => listReads.push({ signal, resolve })) : readDrafts([a, b]),
+  undefined, {
+    readDetail: (request) => defer
+      ? new Promise((resolve) => detailReads.push({ ...request, resolve }))
+      : readDrafts(request.filters[0][1] === a.id ? a : b),
+    updateDraft: () => assert.fail("Save must be blocked during deletion"),
+    deleteDraft: (request) => new Promise((resolve) => {
+      deletes.push(request);
+      finishDelete = resolve;
+    }),
+  });
+});
+
+test("Reports preserves unsaved inputs on unconfirmed DELETE and blocks DELETE during a save", async () => {
+  const row = detailRow(1);
+  const replies = [
+    { data: [], error: null },
+    { data: [{ id: row.id }], error: READ_FAILURE },
+    { data: [{ id: detailRow(2).id }], error: null },
+    { data: [{ id: row.id }, { id: row.id }], error: null },
+    { data: null, error: null },
+  ];
+  let finishSave;
+  await runDom(async (h) => {
+    await mountReports(h);
+    await openDraft(h, row.title);
+    await waitFor(h.act, () => !buttonByText("Save changes").disabled);
+    field("body").value = "Unsaved text";
+    for (const message of ["This draft is no longer available.", ...Array(4).fill("database")]) {
+      await clickReportButton(h, "Delete draft");
+      await clickReportButton(h, "Confirm delete");
+      await waitFor(h.act, () => alerts().some((alert) => text(alert).includes("Could not delete draft.")));
+      assert.ok(alerts().some((alert) => text(alert).toLowerCase().includes(message.toLowerCase())));
+      assert.doesNotMatch(text(document.body), /secret refresh failure|Draft deleted/);
+      assert.equal(field("body").value, "Unsaved text");
+      assert.ok(buttonByText(row.title));
+    }
+    await clickReportButton(h, "Save changes");
+    await waitFor(h.act, () => finishSave && buttonByText("Delete draft").disabled);
+    await clickReportButton(h, "Delete draft");
+    assert.equal(buttonByText("Confirm delete"), null);
+    await h.act(async () => { finishSave(); });
+    await waitFor(h.act, () => text(document.body).includes("Changes saved."));
+  }, () => readDrafts([row]), undefined, {
+    readDetail: () => readDrafts(row),
+    deleteDraft: () => {
+      assert.ok(replies.length);
+      return Promise.resolve(replies.shift());
+    },
+    updateDraft: ({ payload }) => new Promise((resolve) => {
+      finishSave = () => resolve({ data: { ...row, ...payload }, error: null });
+    }),
+  });
+});
+
 test("Reports requires a successful fresh read after rapidly reopening a cached draft", async () => {
   const { flushSync } = require("react-dom");
   let a = detailRow(1, { title: "Draft A", body: "Obsolete A body" });
@@ -1247,12 +1383,13 @@ test("Reports keeps nullable edit fields and unsaved text through unconfirmed UP
   });
 });
 
-test("Mocked report policies deny other authors' drafts across all roles and edit filters exclude later states", async () => {
+test("Mocked report policies deny other authors' drafts across all roles and write filters exclude later states", async () => {
   const foreign = detailRow(1, { author: "user-b" });
   const submitted = detailRow(2, { author: "user-a", review_status: "submitted" });
   const reviewed = detailRow(3, { author: "user-a", review_status: "reviewed" });
   const own = detailRow(4, { author: "user-a" });
-  const rows = [foreign, submitted, reviewed, own];
+  const inactive = detailRow(5, { author: "user-a", record_status: "archived" });
+  const rows = [foreign, submitted, reviewed, own, inactive];
   let access;
   function visible(request) {
     // Simulated RLS. Other policies can expose submitted/reviewed rows for reads.
@@ -1261,24 +1398,31 @@ test("Mocked report policies deny other authors' drafts across all roles and edi
   }
   await runDom(async ({ qc, load, database }) => {
     const { fetchReportDraftDetail, updateReportDraft } = load("./editReportDraft.ts");
+    const { deleteReportDraft } = load("./deleteReportDraft.ts");
     const context = { userId: "user-a" };
     const input = { species_id: LYNX, specimen_id: null, report_type: null, title: null, body: null };
     for (const role of ["employee", "senior", "management"]) {
       grant(qc, context.userId, role);
       access = qc.getVerifiedAuthSnapshot();
       assert.equal(access.role, role);
-      for (const blocked of [foreign, submitted, reviewed]) {
+      for (const blocked of [foreign, submitted, reviewed, inactive]) {
         assert.equal(await fetchReportDraftDetail(database.client, blocked.id, new AbortController().signal), null);
         await assert.rejects(updateReportDraft(database.client, blocked.id, input, context), { code: "not_found" });
+        await assert.rejects(deleteReportDraft(database.client, blocked.id, context), { code: "not_found" });
       }
       assert.equal((await fetchReportDraftDetail(database.client, own.id, new AbortController().signal)).id, own.id);
       assert.equal((await updateReportDraft(database.client, own.id, input, context)).id, own.id);
+      assert.equal(await deleteReportDraft(database.client, own.id, context), own.id);
     }
   }, undefined, undefined, {
     readDetail: (request) => readDrafts(visible(request)),
     updateDraft(request) {
       const row = visible(request);
       return readDrafts(row ? { ...row, ...request.payload } : null);
+    },
+    deleteDraft(request) {
+      const row = visible(request);
+      return readDrafts(row?.author === access.userId ? [{ id: row.id }] : []);
     },
   });
 });
@@ -1358,4 +1502,135 @@ test("Reports prevents UPDATE if the access epoch changes during token lookup fo
     readDetail: () => readDrafts(original),
     updateDraft: () => { updates++; return readDrafts(); },
   });
+});
+
+for (const transition of ["logout", "account switch", "same-user permission change"]) {
+  test(`Reports ignores a late DELETE confirmation after ${transition}`, async () => {
+    const a = detailRow(1, { title: "Draft A" });
+    const b = detailRow(2, { title: "Draft B" });
+    let finishDelete;
+    await runDom(async (h) => {
+      await mountReports(h);
+      await openDraft(h, a.title);
+      await clickReportButton(h, "Delete draft");
+      await clickReportButton(h, "Confirm delete");
+      await waitFor(h.act, () => finishDelete !== undefined);
+      await h.act(async () => {
+        if (transition === "logout") h.qc.bindBrowserQueryCacheToUser(null);
+        else if (transition === "account switch") grant(h.qc, "user-b");
+        else grant(h.qc, "user-a", "management");
+      });
+      if (transition !== "logout") await openDraft(h, b.title);
+      const { userId } = h.qc.getVerifiedAuthSnapshot();
+      const currentList = h.client.getQueryData(ownDraftKey(userId));
+      await h.act(async () => { finishDelete({ data: [{ id: a.id }], error: null }); });
+      assert.doesNotMatch(text(document.body), /Draft deleted|Could not delete draft/);
+      assert.strictEqual(h.client.getQueryData(ownDraftKey(userId)), currentList);
+      assert.equal(h.client.getQueryData(detailKey("user-a", a.id)), undefined);
+      if (transition === "logout") assert.equal(draftForm(), null);
+      else assert.equal(field("title").value, b.title);
+    }, () => readDrafts([a, b]), undefined, {
+      readDetail: ({ filters }) => readDrafts(filters[0][1] === a.id ? a : b),
+      deleteDraft: () => new Promise((resolve) => { finishDelete = resolve; }),
+    });
+  });
+}
+
+test("Reports prevents DELETE if the access epoch changes during token lookup", async () => {
+  const row = detailRow(1);
+  let finishSession;
+  let deletes = 0;
+  await runDom(async (h) => {
+    await mountReports(h);
+    await openDraft(h, row.title);
+    h.database.client.auth.getSession = () => new Promise((resolve) => { finishSession = resolve; });
+    await clickReportButton(h, "Delete draft");
+    await clickReportButton(h, "Confirm delete");
+    await waitFor(h.act, () => finishSession !== undefined);
+    await h.act(async () => {
+      grant(h.qc, "user-a", "management");
+      finishSession({ data: { session: { user: { id: "user-a" }, access_token: "old-token" } }, error: null });
+    });
+    assert.equal(deletes, 0);
+    assert.ok(buttonByText("Save draft"));
+    assert.equal(buttonByText("Delete draft"), null);
+  }, () => readDrafts([row]), undefined, {
+    readDetail: () => readDrafts(row),
+    deleteDraft: () => { deletes++; return readDrafts([{ id: row.id }]); },
+  });
+});
+
+test("Installed Supabase SDK dispatches a current DELETE with its pinned token and blocks obsolete draft writes", { timeout: 10000 }, async () => {
+  const installed = installDom();
+  const outbound = [];
+  const row = detailRow(1);
+  const load = loadGraph(null, {
+    process: { env: {
+      NEXT_PUBLIC_SUPABASE_URL: "https://reports.example.invalid",
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_test",
+    } },
+    fetch: async (input, init) => {
+      outbound.push({ url: new URL(input), method: init.method, headers: new Headers(init.headers) });
+      return Response.json([{ id: row.id }]);
+    },
+  });
+  const qc = load("@/lib/queryClient");
+  const supabase = load("@/lib/supabase").getSupabaseBrowserClient();
+  const { deleteReportDraft } = load("./deleteReportDraft.ts");
+  const { createReportDraft } = load("./createReportDraft.ts");
+  const { updateReportDraft } = load("./editReportDraft.ts");
+  const context = { userId: "user-a" };
+  const draft = { species_id: LYNX, specimen_id: null, report_type: null, title: null, body: null };
+  const deleteDraft = () => deleteReportDraft(supabase, row.id, context);
+  const session = (access_token) => ({ data: { session: { user: { id: context.userId }, access_token } }, error: null });
+
+  async function pauseSdkLookup(write) {
+    let lookups = 0;
+    const entered = Promise.withResolvers();
+    const laterSession = Promise.withResolvers();
+    supabase.auth.getSession = async () => {
+      if (++lookups === 1) return session("original-token");
+      assert.equal(lookups, 2);
+      entered.resolve();
+      return laterSession.promise;
+    };
+    const result = write();
+    await Promise.race([entered.promise, result.then(() => assert.fail("Write finished before the SDK lookup"))]);
+    assert.equal(outbound.length, 0);
+    return { result, resume: () => laterSession.resolve(session("different-token")) };
+  }
+
+  try {
+    grant(qc, context.userId);
+    const current = await pauseSdkLookup(deleteDraft);
+    current.resume();
+    assert.equal(await current.result, row.id);
+    assert.equal(outbound.length, 1);
+    const [{ url, method, headers }] = outbound;
+    assert.equal(method, "DELETE");
+    assert.equal(url.pathname, "/rest/v1/reports");
+    assert.deepEqual(Object.fromEntries(url.searchParams), {
+      id: `eq.${row.id}`, review_status: "eq.draft", record_status: "eq.active", select: "id",
+    });
+    assert.equal(headers.get("Authorization"), "Bearer original-token");
+    outbound.length = 0;
+
+    for (const [write, changeAccess] of [
+      [deleteDraft, () => grant(qc, "user-b")],
+      [deleteDraft, () => grant(qc, context.userId, "management")],
+      [() => createReportDraft(supabase, draft, context), () => grant(qc, "user-b")],
+      [() => updateReportDraft(supabase, row.id, draft, context), () => grant(qc, "user-b")],
+    ]) {
+      grant(qc, context.userId);
+      const obsolete = await pauseSdkLookup(write);
+      changeAccess();
+      obsolete.resume();
+      await assert.rejects(obsolete.result, { name: "AuthenticatedQueryIdentityError" });
+      assert.deepEqual(outbound, []);
+    }
+  } finally {
+    await supabase.auth.dispose();
+    qc.getQueryClient().clear();
+    installed.restore();
+  }
 });

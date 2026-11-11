@@ -228,3 +228,52 @@ Conclusion: The local Assistant MVP is functional and has passed the principal c
 - Specimen-linked editing: NOT TESTED live; no specimen fixtures available.
 
 **Conclusion:** Independent code review passed. The remaining negative-path verification gaps and offline editor behaviour are documented under REPORT-VERIFY-01 in `docs/planning/TODO.md`. These are deferred and do not independently invalidate the Step 4.6 code-review verdict.
+
+---
+
+### Step 4.7 — Report Draft Deletion: Verification
+
+**Date:** 11 November 2026  
+**Environment:** Local development  
+**Branch:** `feat/reports-authoring`  
+**Baseline commit:** `b9f253e37f5d6392191ef7ba27bac1dab66dc33d`
+
+**Independent review verdict:** PASS WITH NON-BLOCKING FINDINGS.
+
+#### Automated verification
+
+- Targeted independent re-review: **79 tests passed, 0 failed, 0 skipped**.
+- TypeScript (`--incremental false`): PASS.
+- Changed-file ESLint (without caching): PASS.
+- `git diff --check`: PASS.
+- Production build: PASSED during the initial implementation, as reported by Codex; **not independently rerun after the final transport-guard correction**.
+
+#### Security and correctness
+
+- Existing RLS permits hard deletion only of the author's own `draft/active` reports.
+- DELETE requests filter by report ID and both lifecycle statuses.
+- Zero-row, invalid and mismatched responses cannot confirm successful deletion.
+- Independent real-SDK transport tests verified that INSERT, UPDATE and DELETE do not dispatch after the originating verified access epoch ends.
+- The original dispatch race was reproduced by bypassing the new guard, confirming that the regression test detects the vulnerability.
+- An already-dispatched write may complete under its original identity; stale responses remain isolated from subsequent sessions.
+- Ownership and lifecycle denials were verified through code review and mocked tests, not direct live authenticated DELETE attempts.
+
+#### Manual browser smoke testing
+
+- [X] Confirmation cancellation preserves the draft.
+- [X] Confirmed deletion removes the draft and returns the editor to creation mode.
+- [X] Deleted drafts remain absent after closing/reopening Reports.exe or refreshing.
+- [X] Repeat with another linked test account, where practical.
+
+**Status:** PASS — record actual results after testing.
+
+#### Outstanding limitations
+
+Two non-blocking UI edge cases remain:
+
+1. A concurrent unavailable-detail response may hide pending deletion feedback.
+2. Closing and reopening Reports.exe during an in-flight deletion may leave the reopened editor showing an unavailable-draft message.
+
+Tracked as `REPORT-UI-02` in `docs/planning/TODO.md`.
+
+**Conclusion:** Step 4.7 passed independent code review after correction of the transport-dispatch race. The remaining UI observations are non-blocking. Final browser verification and commit details should be recorded after completion.

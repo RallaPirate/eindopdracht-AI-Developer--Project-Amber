@@ -10,6 +10,7 @@ import {
   isAuthenticatedAccessCurrent,
 } from "@/lib/queryCacheIsolation";
 import { getVerifiedAuthSnapshot } from "@/lib/queryClient";
+import { guardedSupabaseSignal } from "@/lib/supabaseDispatchGuard";
 import {
   compareReportDrafts,
   DRAFT_COLUMNS,
@@ -60,21 +61,27 @@ export function validateDraftSubject(
 export async function withReportDraftSession<T>(
   supabase: SupabaseClient,
   { userId }: AuthenticatedMutationContext,
-  request: (accessToken: string) => PromiseLike<T>,
+  request: (accessToken: string, signal: AbortSignal) => PromiseLike<T>,
 ): Promise<T> {
   const epoch = getVerifiedAuthSnapshot().accessEpoch;
-  const { data: { session }, error } = await supabase.auth.getSession();
-  const current = getVerifiedAuthSnapshot();
-  if (
-    current.status !== "ready"
-    || !isAuthenticatedAccessCurrent(current.userId, current.accessEpoch, { userId, epoch })
-  ) {
-    throw new AuthenticatedQueryIdentityError();
+  function requireCurrent() {
+    const current = getVerifiedAuthSnapshot();
+    if (
+      current.status !== "ready"
+      || !isAuthenticatedAccessCurrent(current.userId, current.accessEpoch, { userId, epoch })
+    ) {
+      throw new AuthenticatedQueryIdentityError();
+    }
   }
+  const { data: { session }, error } = await supabase.auth.getSession();
+  requireCurrent();
   if (error || session?.user.id !== userId || !session.access_token) {
     return unwrapAppResult(err("unauthenticated"));
   }
-  return request(session.access_token);
+  const response = await request(session.access_token, guardedSupabaseSignal(requireCurrent));
+  // The SDK can turn a rejected fetch into a PostgREST error result.
+  requireCurrent();
+  return response;
 }
 
 export async function createReportDraft(
@@ -82,7 +89,7 @@ export async function createReportDraft(
   draft: NewReportDraft,
   context: AuthenticatedMutationContext,
 ): Promise<ReportDraft> {
-  const response = await withReportDraftSession(supabase, context, (accessToken) => supabase
+  const response = await withReportDraftSession(supabase, context, (accessToken, signal) => supabase
     .from("reports")
     .insert({
       species_id: draft.species_id,
@@ -92,6 +99,7 @@ export async function createReportDraft(
       body: draft.body,
     })
     .select(`${DRAFT_COLUMNS}, specimen_id, created_by, review_status, record_status`)
+    .abortSignal(signal)
     .single()
     // Bind this request to its original session even if the shared client
     // resolves a different default token before the POST goes out.

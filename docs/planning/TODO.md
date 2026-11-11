@@ -40,6 +40,15 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   - Verify after fixing: an accepted species appears immediately; rejected proposals do not alter the list; existing authentication-aware cache isolation remains intact.
   - **Priority:** Low — non-blocking usability defect. Defer until after the essential implementation milestones.
 
+  - [ ] **REPORT-UI-02 — Draft deletion feedback and editor recovery in uncommon navigation scenarios.**
+  - **Observed during:** Step 4.7 independent review, 11 November 2026.
+  - **Issue A:** If a concurrent detail query makes a draft unavailable while deletion is pending, the editor unmounts and can hide the pending or failure feedback.
+  - **Issue B:** If Reports.exe is closed during deletion and reopened before the operation completes, the original success callback is detached. The deleted draft is reconciled in the cache, but the reopened editor may display "This draft is no longer available" instead of automatically returning to creation mode.
+  - **Expected:** Deletion feedback remains visible when the draft detail becomes unavailable. A confirmed deletion leaves the interface in a consistent state, including after closing and reopening the window.
+  - **Verify after fixing:** Both scenarios recover correctly without stale drafts reappearing, duplicate deletion requests, or cross-session cache updates.
+  - **Priority:** Low — non-blocking UI edge cases. Defer until after essential implementation milestones.
+  - **Status:** Independent Step 4.7 review passed with these observations outstanding.
+
 ## Authentication improvements
 
 - [ ] **AUTH-01 — Session verification errors have no recovery UI.**

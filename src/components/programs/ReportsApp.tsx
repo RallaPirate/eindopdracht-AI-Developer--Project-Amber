@@ -8,6 +8,7 @@ import {
   validateDraftSubject,
   type NewReportDraft,
 } from "@/components/programs/createReportDraft";
+import { deleteReportDraft, syncDeletedReportDraft } from "@/components/programs/deleteReportDraft";
 import {
   fetchReportDraftDetail,
   reportDraftDetailQueryKey,
@@ -121,11 +122,14 @@ function draftUnavailable(error: unknown) {
   return error instanceof AppFailure && (error.code === "not_found" || error.code === "unauthorized");
 }
 
-function ReportDraftEditor({ reportId, onBack, ...formProps }: Omit<ReportDraftFormProps, "draft"> & {
+function ReportDraftEditor({ reportId, onBack, onDelete, deleting, ...formProps }: Omit<ReportDraftFormProps, "draft"> & {
   reportId: string;
   onBack: () => void;
+  onDelete: () => void;
+  deleting: boolean;
 }) {
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const detail = useAuthenticatedQuery({
     queryKey: reportDraftDetailQueryKey(reportId),
     refetchOnMount: "always",
@@ -143,11 +147,12 @@ function ReportDraftEditor({ reportId, onBack, ...formProps }: Omit<ReportDraftF
     (detail.isSuccess && detail.data === null) || draftUnavailable(detail.error)
   );
   const failed = detail.isFetchedAfterMount && detail.isError && !unavailable;
+  const showForm = hasLoaded && !unavailable && detail.data;
 
   return (
     <>
       <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <Win95Button disabled={formProps.saving} onClick={onBack}>Back to new draft</Win95Button>
+        <Win95Button disabled={formProps.saving || deleting} onClick={onBack}>Back to new draft</Win95Button>
         {!hasLoaded && !unavailable && (!failed || detail.isFetching) ? (
           <p role="status">Loading draft…</p>
         ) : null}
@@ -161,7 +166,27 @@ function ReportDraftEditor({ reportId, onBack, ...formProps }: Omit<ReportDraftF
           </>
         ) : null}
       </div>
-      {hasLoaded && !unavailable && detail.data ? <ReportDraftForm draft={detail.data} {...formProps} /> : null}
+      {showForm ? (
+        <>
+          <ReportDraftForm draft={showForm} {...formProps} saving={formProps.saving || deleting || confirming} />
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {confirming ? (
+              <>
+                <p>Delete this draft permanently?</p>
+                <Win95Button disabled={deleting} onClick={() => {
+                  setConfirming(false);
+                  onDelete();
+                }}>Confirm delete</Win95Button>
+                <Win95Button onClick={() => setConfirming(false)}>Cancel</Win95Button>
+              </>
+            ) : (
+              <Win95Button disabled={formProps.saving || deleting} onClick={() => setConfirming(true)}>
+                Delete draft
+              </Win95Button>
+            )}
+          </div>
+        </>
+      ) : null}
     </>
   );
 }
@@ -170,7 +195,7 @@ function ReportsWorkspace({ ready }: { ready: boolean }) {
   const [reportId, setReportId] = useState<string | null>(null);
   const [formVersion, setFormVersion] = useState(0);
   const [invalid, setInvalid] = useState(false);
-  const saving = useRef(false);
+  const writePending = useRef(false);
   const drafts = useAuthenticatedQuery({
     queryKey: OWN_REPORT_DRAFTS_QUERY_KEY,
     queryFn: ({ signal }) => fetchOwnReportDrafts(getSupabaseBrowserClient(), signal),
@@ -191,33 +216,61 @@ function ReportsWorkspace({ ready }: { ready: boolean }) {
       else syncEditedReportDraft(saved.draft, context);
     },
   });
+  const remove = useAuthenticatedMutation({
+    mutationKey: ["reports", "delete-draft"],
+    mutationFn: (id: string, context) => deleteReportDraft(getSupabaseBrowserClient(), id, context),
+    retry: false,
+    gcTime: 0,
+    onSuccess: (id, _variables, _result, context) => syncDeletedReportDraft(id, context),
+  });
+  const busy = save.isPending || remove.isPending;
 
   function openDraft(id: string | null) {
-    if (saving.current || save.isPending || id === reportId) return;
+    if (writePending.current || busy || id === reportId) return;
     save.reset();
+    remove.reset();
     setInvalid(false);
     setReportId(id);
   }
 
   function onSave(draft: NewReportDraft | null) {
-    if (saving.current || save.isPending) return;
+    if (writePending.current || busy) return;
+    remove.reset();
     setInvalid(draft === null);
     if (!draft) {
       save.reset();
       return;
     }
-    saving.current = true;
+    writePending.current = true;
     save.mutate({ id: reportId, draft }, {
       onSuccess: ({ mode }) => {
         if (mode === "create") setFormVersion((version) => version + 1);
       },
-      onSettled: () => { saving.current = false; },
+      onSettled: () => { writePending.current = false; },
+    });
+  }
+
+  function onDelete() {
+    if (!reportId || writePending.current || busy) return;
+    writePending.current = true;
+    save.reset();
+    setInvalid(false);
+    remove.mutate(reportId, {
+      onSuccess: (id) => setReportId((current) => current === id ? null : current),
+      onSettled: () => { writePending.current = false; },
     });
   }
 
   const editing = reportId !== null;
   let feedback: ReactNode = null;
-  if (save.isPending) {
+  if (remove.isPending) {
+    feedback = <p role="status">Deleting draft…</p>;
+  } else if (remove.isError) {
+    const message = draftUnavailable(remove.error) ? DRAFT_UNAVAILABLE : toUserMessage(remove.error);
+    feedback = <p role="alert">Could not delete draft. {message}</p>;
+  } else if (remove.isSuccess && !editing) {
+    feedback = <p role="status">Draft deleted.</p>;
+  } else if (save.isPending) {
     feedback = <p role="status">{editing ? "Saving changes…" : "Saving draft…"}</p>;
   } else if (save.isSuccess) {
     feedback = <p role="status">{editing ? "Changes saved." : "Draft saved."}</p>;
@@ -249,7 +302,7 @@ function ReportsWorkspace({ ready }: { ready: boolean }) {
                 type="button"
                 className="max-w-full cursor-pointer text-left underline disabled:cursor-default disabled:no-underline"
                 aria-current={reportId === draft.id ? "true" : undefined}
-                disabled={save.isPending}
+                disabled={busy}
                 onClick={() => openDraft(draft.id)}
               >
                 {draft.title?.trim() ? draft.title : "Untitled draft"}
@@ -273,6 +326,8 @@ function ReportsWorkspace({ ready }: { ready: boolean }) {
           key={reportId}
           reportId={reportId}
           onBack={() => openDraft(null)}
+          onDelete={onDelete}
+          deleting={remove.isPending}
           saving={save.isPending}
           feedback={feedback}
           onSave={onSave}

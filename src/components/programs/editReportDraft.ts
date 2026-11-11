@@ -55,13 +55,14 @@ export async function updateReportDraft(
   context: AuthenticatedMutationContext,
 ): Promise<ReportDraftDetail> {
   const { species_id, specimen_id, report_type, title, body } = draft;
-  const response = await withReportDraftSession(supabase, context, (accessToken) => supabase
+  const response = await withReportDraftSession(supabase, context, (accessToken, signal) => supabase
     .from("reports")
     .update({ species_id, specimen_id, report_type, title, body })
     .eq("id", reportId)
     .eq("review_status", "draft")
     .eq("record_status", "active")
     .select(DETAIL_COLUMNS)
+    .abortSignal(signal)
     .maybeSingle()
     .setHeader("Authorization", `Bearer ${accessToken}`));
   const persisted = parseReportDraftDetail(reportId, unwrapAppResult(fromSupabaseSingleResult(response)));
