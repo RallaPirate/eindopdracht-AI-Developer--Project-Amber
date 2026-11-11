@@ -30,7 +30,7 @@ export async function deleteReportDraft(
   return reportId;
 }
 
-export function syncDeletedReportDraft(reportId: string, { cache }: AuthenticatedMutationCallbackContext) {
+export function syncRemovedOwnReportDraft(reportId: string, { cache }: AuthenticatedMutationCallbackContext) {
   const drafts = cache.getQueryData<ReportDraft[]>(OWN_REPORT_DRAFTS_QUERY_KEY);
   if (drafts) {
     cache.setQueryData(OWN_REPORT_DRAFTS_QUERY_KEY, drafts.filter(({ id }) => id !== reportId));

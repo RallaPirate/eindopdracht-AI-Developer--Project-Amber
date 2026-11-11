@@ -64,7 +64,7 @@ The course reference specifically gives us the streamText + tools + Zod inputSch
 - [X] 4.5 Implement report creation, including report type and species selection. Filter the specimen selector to specimens belonging to the selected species, and enforce the species–specimen match during creation and draft editing.
 - [X] 4.6 Implement draft editing.
 - [X] 4.7 Implement draft deletion.
-- [ ] 4.8 Implement report submission.
+- [X] 4.8 Implement report submission.
 - [ ] 4.9 Verify that submitted report content becomes immutable as designed.
 - [ ] 4.10 Verify that another user cannot access or modify someone else's drafts.
 - [ ] 4.11 Implement the author's report overview for drafts and submitted/reviewed reports, including review/record status.

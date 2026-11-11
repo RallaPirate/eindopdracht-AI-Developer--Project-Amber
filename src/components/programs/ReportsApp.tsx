@@ -8,7 +8,7 @@ import {
   validateDraftSubject,
   type NewReportDraft,
 } from "@/components/programs/createReportDraft";
-import { deleteReportDraft, syncDeletedReportDraft } from "@/components/programs/deleteReportDraft";
+import { deleteReportDraft, syncRemovedOwnReportDraft } from "@/components/programs/deleteReportDraft";
 import {
   fetchReportDraftDetail,
   reportDraftDetailQueryKey,
@@ -23,6 +23,7 @@ import {
 } from "@/components/programs/ownReportDrafts";
 import { SpeciesSpecimenSelector } from "@/components/programs/SpeciesSpecimenSelector";
 import { EMPTY_SUBJECT_SELECTION } from "@/components/programs/specimenSelection";
+import { submitReportDraft } from "@/components/programs/submitReportDraft";
 import { Win95Button } from "@/components/ui/Win95Button";
 import { useAuthenticatedMutation, useAuthenticatedQuery, useVerifiedAuthSnapshot } from "@/hooks/useAuthenticatedQuery";
 import { AppFailure, toUserMessage } from "@/lib/appResult";
@@ -42,9 +43,11 @@ type ReportDraftFormProps = {
   saving: boolean;
   feedback: ReactNode;
   onSave: (draft: NewReportDraft | null) => void;
+  savedDraft?: ReportDraftDetail;
+  onRequestSubmission?: (draft: ReportDraftDetail) => void;
 };
 
-function ReportDraftForm({ draft, saving, feedback, onSave }: ReportDraftFormProps) {
+function ReportDraftForm({ draft, saving, feedback, onSave, savedDraft, onRequestSubmission }: ReportDraftFormProps) {
   // Seed once per editor. Background reads must not overwrite local input.
   const [initial] = useState(draft);
   const [initialSelection] = useState(() => draft && ({
@@ -52,11 +55,27 @@ function ReportDraftForm({ draft, saving, feedback, onSave }: ReportDraftFormPro
   }));
   const selection = useRef(initialSelection ?? EMPTY_SUBJECT_SELECTION);
   const [subjectAvailable, setSubjectAvailable] = useState(!initialSelection);
+  const [saveRequired, setSaveRequired] = useState(false);
+
+  function requestSubmission(form: HTMLFormElement | null) {
+    const persisted = savedDraft ?? initial;
+    if (!form || !persisted || saving) return;
+
+    const fields = new window.FormData(form);
+    const unchanged = selection.current.speciesId === persisted.species_id
+      && selection.current.specimenId === persisted.specimen_id
+      && (fields.get("report_type") || null) === persisted.report_type
+      && draftText(fields.get("title"), persisted.title) === (persisted.title ?? "")
+      && draftText(fields.get("body"), persisted.body) === (persisted.body ?? "");
+    setSaveRequired(!unchanged);
+    if (unchanged) onRequestSubmission?.(persisted);
+  }
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (saving || !subjectAvailable) return;
 
+    setSaveRequired(false);
     const fields = new window.FormData(event.currentTarget);
     const result = newReportDraftSchema.safeParse({
       species_id: selection.current.speciesId,
@@ -110,6 +129,12 @@ function ReportDraftForm({ draft, saving, feedback, onSave }: ReportDraftFormPro
         <Win95Button type="submit" disabled={saving || !subjectAvailable}>
           {initial ? "Save changes" : "Save draft"}
         </Win95Button>
+        {onRequestSubmission ? (
+          <Win95Button disabled={saving} onClick={(event) => requestSubmission(event.currentTarget.form)}>
+            Submit report
+          </Win95Button>
+        ) : null}
+        {saveRequired ? <p role="alert">Save changes before submitting this report.</p> : null}
         {feedback}
       </div>
     </form>
@@ -122,14 +147,27 @@ function draftUnavailable(error: unknown) {
   return error instanceof AppFailure && (error.code === "not_found" || error.code === "unauthorized");
 }
 
-function ReportDraftEditor({ reportId, onBack, onDelete, deleting, ...formProps }: Omit<ReportDraftFormProps, "draft"> & {
+function submissionErrorMessage(error: unknown) {
+  if (error instanceof AppFailure && error.code === "validation") {
+    return "Save a species, report type, title and body before submitting.";
+  }
+  if (error instanceof AppFailure && error.code === "conflict") {
+    return "This draft changed or is no longer available. Reopen it to check the latest version.";
+  }
+  return toUserMessage(error);
+}
+
+function ReportDraftEditor({ reportId, onBack, onDelete, onSubmitReport, deleting, submitting, ...formProps }: Omit<ReportDraftFormProps, "draft" | "onRequestSubmission"> & {
   reportId: string;
   onBack: () => void;
   onDelete: () => void;
+  onSubmitReport: (draft: ReportDraftDetail) => void;
   deleting: boolean;
+  submitting: boolean;
 }) {
   const [hasLoaded, setHasLoaded] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  const [confirmation, setConfirmation] = useState<"delete" | ReportDraftDetail | null>(null);
+  const busy = formProps.saving || deleting || submitting;
   const detail = useAuthenticatedQuery({
     queryKey: reportDraftDetailQueryKey(reportId),
     refetchOnMount: "always",
@@ -152,7 +190,7 @@ function ReportDraftEditor({ reportId, onBack, onDelete, deleting, ...formProps 
   return (
     <>
       <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <Win95Button disabled={formProps.saving || deleting} onClick={onBack}>Back to new draft</Win95Button>
+        <Win95Button disabled={busy} onClick={onBack}>Back to new draft</Win95Button>
         {!hasLoaded && !unavailable && (!failed || detail.isFetching) ? (
           <p role="status">Loading draft…</p>
         ) : null}
@@ -168,19 +206,27 @@ function ReportDraftEditor({ reportId, onBack, onDelete, deleting, ...formProps 
       </div>
       {showForm ? (
         <>
-          <ReportDraftForm draft={showForm} {...formProps} saving={formProps.saving || deleting || confirming} />
+          <ReportDraftForm
+            draft={showForm}
+            {...formProps}
+            saving={busy || confirmation !== null}
+            onRequestSubmission={setConfirmation}
+          />
           <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {confirming ? (
+            {confirmation ? (
               <>
-                <p>Delete this draft permanently?</p>
-                <Win95Button disabled={deleting} onClick={() => {
-                  setConfirming(false);
-                  onDelete();
-                }}>Confirm delete</Win95Button>
-                <Win95Button onClick={() => setConfirming(false)}>Cancel</Win95Button>
+                <p>{confirmation === "delete"
+                  ? "Delete this draft permanently?"
+                  : "Submit this report for review? You can no longer edit it after submission."}</p>
+                <Win95Button disabled={busy} onClick={() => {
+                  setConfirmation(null);
+                  if (confirmation === "delete") onDelete();
+                  else onSubmitReport(confirmation);
+                }}>{confirmation === "delete" ? "Confirm delete" : "Confirm submission"}</Win95Button>
+                <Win95Button onClick={() => setConfirmation(null)}>Cancel</Win95Button>
               </>
             ) : (
-              <Win95Button disabled={formProps.saving || deleting} onClick={() => setConfirming(true)}>
+              <Win95Button disabled={busy} onClick={() => setConfirmation("delete")}>
                 Delete draft
               </Win95Button>
             )}
@@ -195,6 +241,7 @@ function ReportsWorkspace({ ready }: { ready: boolean }) {
   const [reportId, setReportId] = useState<string | null>(null);
   const [formVersion, setFormVersion] = useState(0);
   const [invalid, setInvalid] = useState(false);
+  const [savedDraft, setSavedDraft] = useState<ReportDraftDetail>();
   const writePending = useRef(false);
   const drafts = useAuthenticatedQuery({
     queryKey: OWN_REPORT_DRAFTS_QUERY_KEY,
@@ -221,14 +268,23 @@ function ReportsWorkspace({ ready }: { ready: boolean }) {
     mutationFn: (id: string, context) => deleteReportDraft(getSupabaseBrowserClient(), id, context),
     retry: false,
     gcTime: 0,
-    onSuccess: (id, _variables, _result, context) => syncDeletedReportDraft(id, context),
+    onSuccess: (id, _variables, _result, context) => syncRemovedOwnReportDraft(id, context),
   });
-  const busy = save.isPending || remove.isPending;
+  const submit = useAuthenticatedMutation({
+    mutationKey: ["reports", "submit-draft"],
+    mutationFn: (draft: ReportDraftDetail, context) => submitReportDraft(getSupabaseBrowserClient(), draft, context),
+    retry: false,
+    gcTime: 0,
+    onSuccess: (id, _variables, _result, context) => syncRemovedOwnReportDraft(id, context),
+  });
+  const busy = save.isPending || remove.isPending || submit.isPending;
 
   function openDraft(id: string | null) {
     if (writePending.current || busy || id === reportId) return;
     save.reset();
     remove.reset();
+    submit.reset();
+    setSavedDraft(undefined);
     setInvalid(false);
     setReportId(id);
   }
@@ -236,6 +292,7 @@ function ReportsWorkspace({ ready }: { ready: boolean }) {
   function onSave(draft: NewReportDraft | null) {
     if (writePending.current || busy) return;
     remove.reset();
+    submit.reset();
     setInvalid(draft === null);
     if (!draft) {
       save.reset();
@@ -243,8 +300,9 @@ function ReportsWorkspace({ ready }: { ready: boolean }) {
     }
     writePending.current = true;
     save.mutate({ id: reportId, draft }, {
-      onSuccess: ({ mode }) => {
-        if (mode === "create") setFormVersion((version) => version + 1);
+      onSuccess: (saved) => {
+        if (saved.mode === "create") setFormVersion((version) => version + 1);
+        else setSavedDraft(saved.draft);
       },
       onSettled: () => { writePending.current = false; },
     });
@@ -254,11 +312,23 @@ function ReportsWorkspace({ ready }: { ready: boolean }) {
     if (!reportId || writePending.current || busy) return;
     writePending.current = true;
     save.reset();
+    submit.reset();
     setInvalid(false);
     remove.mutate(reportId, {
       onSuccess: (id) => setReportId((current) => current === id ? null : current),
       onSettled: () => { writePending.current = false; },
     });
+  }
+
+  function onSubmitReport(draft: ReportDraftDetail) {
+    if (draft.id !== reportId || writePending.current || busy) return;
+    writePending.current = true;
+    save.reset();
+    remove.reset();
+    setInvalid(false);
+    void submit.mutateAsync(draft, {
+      onSuccess: (id) => setReportId((current) => current === id ? null : current),
+    }).catch(() => {}).finally(() => { writePending.current = false; });
   }
 
   const editing = reportId !== null;
@@ -321,14 +391,22 @@ function ReportsWorkspace({ ready }: { ready: boolean }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
+      {submit.isPending ? <p role="status">Submitting report…</p> : null}
+      {submit.isSuccess ? <p role="status">Report submitted for review.</p> : null}
+      {submit.isError ? (
+        <p role="alert">Could not submit report. {submissionErrorMessage(submit.error)}</p>
+      ) : null}
       {ready && reportId !== null ? (
         <ReportDraftEditor
           key={reportId}
           reportId={reportId}
           onBack={() => openDraft(null)}
           onDelete={onDelete}
+          onSubmitReport={onSubmitReport}
           deleting={remove.isPending}
+          submitting={submit.isPending}
           saving={save.isPending}
+          savedDraft={savedDraft}
           feedback={feedback}
           onSave={onSave}
         />

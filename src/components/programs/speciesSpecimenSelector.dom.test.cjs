@@ -111,7 +111,10 @@ function createDatabase(readDraftPage, writeDraft, { readDetail, updateDraft, de
           },
           update(payload) { request.payload = { ...payload }; return query; },
           delete() { request.method = "DELETE"; return query; },
-          setHeader(name, value) { return deleteDraft({ ...request, headers: { [name]: value } }); },
+          setHeader(name, value) {
+            const write = request.method === "DELETE" ? deleteDraft : updateDraft;
+            return write({ ...request, headers: { [name]: value } });
+          },
           select(columns) { request.columns = columns; return query; },
           eq(...filter) { request.filters.push(filter); return query; },
           order(column, { ascending }) { request.orders.push([column, ascending]); return query; },
@@ -903,6 +906,14 @@ function detailRow(index, fields = {}) {
   return draftRow(index, { specimen_id: null, body: null, review_status: "draft", record_status: "active", ...fields });
 }
 
+function completeDraft(fields = {}) {
+  return detailRow(1, { report_type: "care", body: "Saved report body", ...fields });
+}
+
+function submittedRow(id, fields = {}) {
+  return { id, review_status: "submitted", record_status: "active", submitted_at: UPDATED_AT, ...fields };
+}
+
 async function openDraft({ act }, label, expectForm = true) {
   await waitFor(act, () => buttonByText(label) !== null);
   await act(async () => { buttonByText(label).click(); });
@@ -1384,9 +1395,9 @@ test("Reports keeps nullable edit fields and unsaved text through unconfirmed UP
 });
 
 test("Mocked report policies deny other authors' drafts across all roles and write filters exclude later states", async () => {
-  const foreign = detailRow(1, { author: "user-b" });
-  const submitted = detailRow(2, { author: "user-a", review_status: "submitted" });
-  const reviewed = detailRow(3, { author: "user-a", review_status: "reviewed" });
+  const foreign = completeDraft({ author: "user-b" });
+  const submitted = detailRow(2, { author: "user-a", body: "Saved report body", review_status: "submitted" });
+  const reviewed = detailRow(3, { author: "user-a", body: "Saved report body", review_status: "reviewed" });
   const own = detailRow(4, { author: "user-a" });
   const inactive = detailRow(5, { author: "user-a", record_status: "archived" });
   const rows = [foreign, submitted, reviewed, own, inactive];
@@ -1399,6 +1410,7 @@ test("Mocked report policies deny other authors' drafts across all roles and wri
   await runDom(async ({ qc, load, database }) => {
     const { fetchReportDraftDetail, updateReportDraft } = load("./editReportDraft.ts");
     const { deleteReportDraft } = load("./deleteReportDraft.ts");
+    const { submitReportDraft } = load("./submitReportDraft.ts");
     const context = { userId: "user-a" };
     const input = { species_id: LYNX, specimen_id: null, report_type: null, title: null, body: null };
     for (const role of ["employee", "senior", "management"]) {
@@ -1409,6 +1421,9 @@ test("Mocked report policies deny other authors' drafts across all roles and wri
         assert.equal(await fetchReportDraftDetail(database.client, blocked.id, new AbortController().signal), null);
         await assert.rejects(updateReportDraft(database.client, blocked.id, input, context), { code: "not_found" });
         await assert.rejects(deleteReportDraft(database.client, blocked.id, context), { code: "not_found" });
+        await assert.rejects(submitReportDraft(database.client, {
+          ...blocked, body: "Saved report body", review_status: "draft", record_status: "active",
+        }, context), { code: "conflict" });
       }
       assert.equal((await fetchReportDraftDetail(database.client, own.id, new AbortController().signal)).id, own.id);
       assert.equal((await updateReportDraft(database.client, own.id, input, context)).id, own.id);
@@ -1418,6 +1433,9 @@ test("Mocked report policies deny other authors' drafts across all roles and wri
     readDetail: (request) => readDrafts(visible(request)),
     updateDraft(request) {
       const row = visible(request);
+      if (request.payload.review_status === "submitted") {
+        return readDrafts(row ? [submittedRow(row.id)] : []);
+      }
       return readDrafts(row ? { ...row, ...request.payload } : null);
     },
     deleteDraft(request) {
@@ -1560,18 +1578,198 @@ test("Reports prevents DELETE if the access epoch changes during token lookup", 
   });
 });
 
-test("Installed Supabase SDK dispatches a current DELETE with its pinned token and blocks obsolete draft writes", { timeout: 10000 }, async () => {
+test("Reports requires saving before confirmation and submits the acknowledged version once", async () => {
+  let row = completeDraft();
+  const writes = [];
+  const listReads = [];
+  let deferList = false;
+  let finishSubmit;
+  let submitted = false;
+  await runDom(async (h) => {
+    await mountReports(h);
+    await openDraft(h, row.title);
+    assert.ok(buttonByText("Submit report"));
+    field("body").value = "New body";
+    await clickReportButton(h, "Submit report");
+    assert.match(text(draftForm()), /Save changes before submitting/);
+    assert.equal(buttonByText("Confirm submission"), null);
+    assert.equal(writes.length, 0);
+
+    await waitFor(h.act, () => !buttonByText("Save changes").disabled);
+    await clickReportButton(h, "Save changes");
+    await waitFor(h.act, () => text(draftForm()).includes("Changes saved."));
+    await clickReportButton(h, "Submit report");
+    await clickReportButton(h, "Cancel");
+    assert.equal(writes.length, 1);
+    deferList = true;
+    await h.act(async () => { void h.client.invalidateQueries({ queryKey: ownDraftKey("user-a") }); });
+    await waitFor(h.act, () => listReads.length === 1);
+    await clickReportButton(h, "Submit report");
+    await h.act(async () => {
+      const confirm = buttonByText("Confirm submission");
+      confirm.click();
+      confirm.click();
+    });
+    await waitFor(h.act, () => finishSubmit !== undefined);
+    assert.match(text(document.body), /Submitting report/);
+    for (const label of ["Save changes", "Delete draft", "Submit report", row.title]) {
+      assert.equal(buttonByText(label).disabled, true);
+    }
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes[1].payload, { review_status: "submitted" });
+    assert.deepEqual(writes[1].filters, [...editFilters(row.id), ["updated_at", row.updated_at]]);
+    assert.equal(field("body").value, row.body);
+    await h.act(async () => { finishSubmit(); });
+    await waitFor(h.act, () => text(document.body).includes("Report submitted for review."));
+    assert.equal(listReads[0].signal.aborted, true);
+    await h.act(async () => { listReads[0].resolve(readDrafts([row])); });
+    assert.equal(buttonByText("Save changes"), null);
+    assert.equal(buttonByText("Submit report"), null);
+    assert.equal(buttonByText(row.title), null);
+    assert.equal(h.client.getQueryData(ownDraftKey("user-a")).length, 0);
+    assert.equal(h.client.getQueryData(detailKey("user-a", row.id)) ?? null, null);
+    const { submitReportDraft } = h.load("./submitReportDraft.ts");
+    await assert.rejects(submitReportDraft(h.database.client, row, { userId: "user-a" }), { code: "conflict" });
+  }, ({ signal }) => deferList && !submitted
+    ? new Promise((resolve) => listReads.push({ signal, resolve }))
+    : readDrafts(submitted ? [] : [row]), undefined, {
+    readDetail: () => readDrafts(submitted ? null : row),
+    updateDraft(request) {
+      writes.push(request);
+      if (request.payload.review_status === "submitted") {
+        if (submitted) return readDrafts([]);
+        return new Promise((resolve) => {
+          finishSubmit = () => {
+            submitted = true;
+            resolve(readDrafts([submittedRow(row.id)]));
+          };
+        });
+      }
+      row = { ...row, ...request.payload, updated_at: "2026-03-15T14:30:45.123457Z" };
+      return readDrafts(row);
+    },
+  });
+});
+
+test("Reports refuses incomplete and invalid persisted drafts and requires a confirmed submission row", async () => {
+  const row = completeDraft();
+  let response;
+  let writes = 0;
+  await runDom(async ({ qc, load, database }) => {
+    const { submitReportDraft } = load("./submitReportDraft.ts");
+    const submit = (draft, userId = "user-a") => submitReportDraft(database.client, draft, { userId });
+    grant(qc, "user-a");
+    for (const fields of [
+      { title: " \t " }, { body: "\n" }, { body: null }, { report_type: null },
+      { report_type: "invalid" }, { species_id: null }, { specimen_id: "invalid" },
+      { review_status: "submitted" }, { record_status: "archived" }, { updated_at: null },
+    ]) {
+      await assert.rejects(submit({ ...row, ...fields }), { code: "validation" });
+    }
+    await assert.rejects(submit(row, "user-b"), { name: "AuthenticatedQueryIdentityError" });
+    assert.equal(writes, 0);
+
+    const confirmation = submittedRow(row.id);
+    for (const [result, code] of [
+      [readDrafts([]), "conflict"],
+      [{ data: null, error: { code: "42501", message: "private policy" } }, "unauthorized"],
+      [{ data: [confirmation], error: READ_FAILURE }, "database"],
+      [readDrafts(null), "database"],
+      [readDrafts(confirmation), "database"],
+      [readDrafts([confirmation, confirmation]), "database"],
+      [readDrafts([submittedRow(detailRow(2).id)]), "database"],
+      [readDrafts([submittedRow(row.id, { review_status: "draft" })]), "database"],
+      [readDrafts([submittedRow(row.id, { record_status: "archived" })]), "database"],
+      [readDrafts([submittedRow(row.id, { submitted_at: null })]), "database"],
+      [readDrafts([submittedRow(row.id, { submitted_at: "invalid" })]), "database"],
+    ]) {
+      response = result;
+      await assert.rejects(submit(row), { code });
+    }
+  }, undefined, undefined, {
+    updateDraft() { writes++; return response; },
+  });
+});
+
+test("Reports rejects submission when a background read finds a newer version", async () => {
+  const original = completeDraft();
+  let row = original;
+  let attempted;
+  await runDom(async (h) => {
+    await mountReports(h);
+    await openDraft(h, row.title);
+    row = { ...row, body: "Concurrent edit", updated_at: "2026-03-15T14:30:45.123457Z" };
+    await h.act(async () => {
+      await h.client.invalidateQueries({ queryKey: detailKey("user-a", row.id) });
+    });
+    assert.equal(field("body").value, original.body);
+    await clickReportButton(h, "Submit report");
+    await clickReportButton(h, "Confirm submission");
+    await waitFor(h.act, () => text(document.body).includes("This draft changed"));
+    assert.deepEqual(attempted.filters, [...editFilters(row.id), ["updated_at", original.updated_at]]);
+    assert.ok(buttonByText("Save changes"));
+    assert.ok(buttonByText(row.title));
+    assert.doesNotMatch(text(document.body), /Report submitted for review/);
+  }, () => readDrafts([row]), undefined, {
+    readDetail: () => readDrafts(row),
+    updateDraft(request) {
+      attempted = request;
+      assert.equal(request.filters.every(([key, value]) => row[key] === value), false);
+      return readDrafts([]);
+    },
+  });
+});
+
+for (const transition of ["logout", "account switch", "permission change"]) {
+  test(`Reports ignores late submission confirmation after ${transition}`, async () => {
+    const { notifyManager } = require("@tanstack/react-query");
+    const row = completeDraft();
+    let finishSubmit;
+    await runDom(async (h) => {
+      await mountReports(h);
+      await openDraft(h, row.title);
+      await clickReportButton(h, "Submit report");
+      await clickReportButton(h, "Confirm submission");
+      await waitFor(h.act, () => finishSubmit !== undefined);
+      // The access change can evict the mutation before its request settles.
+      const submission = h.client.getMutationCache().find({ status: "pending" });
+      assert.ok(submission);
+      await h.act(async () => {
+        if (transition === "logout") h.qc.bindBrowserQueryCacheToUser(null);
+        else if (transition === "account switch") grant(h.qc, "user-b");
+        else grant(h.qc, "user-a", "management");
+      });
+      const { userId } = h.qc.getVerifiedAuthSnapshot();
+      if (userId) await waitFor(h.act, () => h.client.getQueryData(ownDraftKey(userId)) !== undefined);
+      const list = h.client.getQueryData(ownDraftKey(userId));
+      await h.act(async () => { finishSubmit(readDrafts([submittedRow(row.id)])); });
+      await waitFor(h.act, () => submission.state.status !== "pending" && h.client.isFetching() === 0);
+      // Cache state can settle before the scheduled React Query observers run.
+      await h.act(async () => { await new Promise((resolve) => notifyManager.schedule(resolve)); });
+      assert.equal(submission.state.status, "error");
+      assert.equal(submission.state.error?.name, "AuthenticatedQueryIdentityError");
+      assert.strictEqual(h.client.getQueryData(ownDraftKey(userId)), list);
+      assert.equal(h.client.getQueryData(detailKey("user-a", row.id)), undefined);
+      assert.doesNotMatch(text(document.body), /Report submitted|Could not submit|Submitting report/);
+    }, () => readDrafts([row]), undefined, {
+      readDetail: () => readDrafts(row),
+      updateDraft: () => new Promise((resolve) => { finishSubmit = resolve; }),
+    });
+  });
+}
+
+test("Installed Supabase SDK pins current DELETE and submission tokens and blocks obsolete draft writes", { timeout: 10000 }, async () => {
   const installed = installDom();
   const outbound = [];
-  const row = detailRow(1);
+  const row = completeDraft();
   const load = loadGraph(null, {
     process: { env: {
       NEXT_PUBLIC_SUPABASE_URL: "https://reports.example.invalid",
       NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_test",
     } },
     fetch: async (input, init) => {
-      outbound.push({ url: new URL(input), method: init.method, headers: new Headers(init.headers) });
-      return Response.json([{ id: row.id }]);
+      outbound.push({ url: new URL(input), method: init.method, headers: new Headers(init.headers), body: init.body });
+      return Response.json([init.method === "PATCH" ? submittedRow(row.id) : { id: row.id }]);
     },
   });
   const qc = load("@/lib/queryClient");
@@ -1579,9 +1777,11 @@ test("Installed Supabase SDK dispatches a current DELETE with its pinned token a
   const { deleteReportDraft } = load("./deleteReportDraft.ts");
   const { createReportDraft } = load("./createReportDraft.ts");
   const { updateReportDraft } = load("./editReportDraft.ts");
+  const { submitReportDraft } = load("./submitReportDraft.ts");
   const context = { userId: "user-a" };
   const draft = { species_id: LYNX, specimen_id: null, report_type: null, title: null, body: null };
   const deleteDraft = () => deleteReportDraft(supabase, row.id, context);
+  const submitDraft = () => submitReportDraft(supabase, row, context);
   const session = (access_token) => ({ data: { session: { user: { id: context.userId }, access_token } }, error: null });
 
   async function pauseSdkLookup(write) {
@@ -1615,9 +1815,27 @@ test("Installed Supabase SDK dispatches a current DELETE with its pinned token a
     assert.equal(headers.get("Authorization"), "Bearer original-token");
     outbound.length = 0;
 
+    const submission = await pauseSdkLookup(submitDraft);
+    submission.resume();
+    assert.equal(await submission.result, row.id);
+    assert.equal(outbound.length, 1);
+    const [patch] = outbound;
+    assert.equal(patch.method, "PATCH");
+    assert.equal(patch.url.pathname, "/rest/v1/reports");
+    assert.deepEqual(Object.fromEntries(patch.url.searchParams), {
+      id: `eq.${row.id}`, review_status: "eq.draft", record_status: "eq.active",
+      updated_at: `eq.${row.updated_at}`, select: "id,review_status,record_status,submitted_at",
+    });
+    assert.deepEqual(JSON.parse(patch.body), { review_status: "submitted" });
+    assert.equal(patch.headers.get("Authorization"), "Bearer original-token");
+    outbound.length = 0;
+
     for (const [write, changeAccess] of [
       [deleteDraft, () => grant(qc, "user-b")],
       [deleteDraft, () => grant(qc, context.userId, "management")],
+      [submitDraft, () => qc.bindBrowserQueryCacheToUser(null)],
+      [submitDraft, () => grant(qc, "user-b")],
+      [submitDraft, () => grant(qc, context.userId, "management")],
       [() => createReportDraft(supabase, draft, context), () => grant(qc, "user-b")],
       [() => updateReportDraft(supabase, row.id, draft, context), () => grant(qc, "user-b")],
     ]) {

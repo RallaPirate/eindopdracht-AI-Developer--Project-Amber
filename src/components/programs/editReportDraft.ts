@@ -10,7 +10,7 @@ import { DRAFT_COLUMNS, reportDraftSchema } from "./ownReportDrafts";
 
 const DETAIL_COLUMNS = `${DRAFT_COLUMNS}, specimen_id, body, review_status, record_status`;
 
-const reportDraftDetailSchema = reportDraftSchema.extend({
+export const reportDraftDetailSchema = reportDraftSchema.extend({
   specimen_id: z.guid().nullable(),
   body: z.string().nullable(),
   review_status: z.literal("draft"),

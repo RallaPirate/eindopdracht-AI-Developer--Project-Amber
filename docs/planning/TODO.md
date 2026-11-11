@@ -49,6 +49,31 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   - **Priority:** Low — non-blocking UI edge cases. Defer until after essential implementation milestones.
   - **Status:** Independent Step 4.7 review passed with these observations outstanding.
 
+[ ] **REPORT-UI-03 — Reconcile drafts after ambiguous submission responses** 
+
+**Applies to:** Step 4.8 — Report Submission  
+**Priority:** Low — non-blocking.
+
+If submission commits in Supabase but its response is lost or malformed, the application correctly withholds success feedback. However, My drafts may retain the cached entry until refetching.
+
+- [ ] Invalidate the authenticated draft-list and detail queries after an ambiguous submission outcome.
+- [ ] Do not automatically retry a potentially committed submission.
+- [ ] Verify that stale draft entries disappear without affecting other users' caches.
+
+[ ] **REPORT-CONCURRENCY-01 — Prevent stale draft edits from overwriting newer changes**
+
+**Applies to:** Step 4.6 — Draft Editing  
+**Priority:** Medium — non-blocking for Step 4.8.
+
+Unlike Step 4.8 submission, the existing Save changes mutation does not check the persisted `updated_at` version before updating.
+
+- [ ] Add an optimistic concurrency check to draft editing.
+- [ ] Reject stale Save changes attempts with clear conflict feedback.
+- [ ] Verify that concurrent edits in separate browser tabs cannot silently overwrite newer content.
+- [ ] Preserve existing draft editing, authentication and cache-isolation safeguards.
+
+**Status:** Deferred until after essential implementation milestones. Neither finding blocks Step 4.8 completion.
+
 ## Authentication improvements
 
 - [ ] **AUTH-01 — Session verification errors have no recovery UI.**
