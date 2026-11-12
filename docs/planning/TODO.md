@@ -93,7 +93,7 @@ Unlike Step 4.8 submission, the existing Save changes mutation does not check th
 
 - [ ] Test a failed report UPDATE while authentication remains verified. Confirm that unsaved inputs survive and retry succeeds.
 - [ ] Investigate the loss of unsaved editor input during full network disconnection. Coordinate with existing AUTH-01; do not weaken authentication or protected-data safeguards.
-- [ ] Verify direct authenticated UPDATE denial for another author's draft and for non-draft reports, using disposable test records. Confirm that rejected operations leave stored data unchanged.
+- [X] Verify direct authenticated UPDATE denial for another author's draft and for submitted reports using disposable test records. Batch D confirmed unchanged stored rows after the denied writes on 12 November 2026.
 - [ ] Verify specimen-linked editing against live Supabase when a suitable fixture exists.
 
 **Background:** During local Step 4.6 testing on 11 November 2026, taking the browser fully offline caused Authentication.exe to suspend protected access and the editor's unsaved changes were lost. This did not isolate a failed UPDATE under an otherwise verified session. Cross-author draft visibility was checked through the UI, but direct unauthorised UPDATE attempts were not performed.

@@ -277,3 +277,19 @@ Two non-blocking UI edge cases remain:
 Tracked as `REPORT-UI-02` in `docs/planning/TODO.md`.
 
 **Conclusion:** Step 4.7 passed independent code review after correction of the transport-dispatch race. The remaining UI observations are non-blocking. Final browser verification and commit details should be recorded after completion.
+
+---
+
+### Batch D — Steps 4.9 and 4.10
+
+**Date:** 12 November 2026
+
+**Environment:** Existing Project Amber Supabase project
+
+**Evidence:** Terminal output from the independently reviewed Batch D harness, using authenticated test sessions.
+
+- **4.9 Submitted report immutability — PASS (live direct API).** Submission and both permitted review-note saves returned HTTP 200 with one row each. Senior and Management audit and timestamp assertions passed. Author UPDATE and DELETE returned HTTP 200 with zero rows. Reviewer changes to species, specimen, report type, title and body, and reversion to draft, returned HTTP 400 with `P0001`. Changes to creator and creation time, and attempts to change or clear submission time, returned HTTP 403 with `42501`.
+- **4.10 Cross-author draft isolation — PASS (live direct API).** All nine cross-author SELECT, UPDATE and DELETE requests across Employee B, Senior and Management returned HTTP 200 with zero rows. The owner's create, read, edit and delete controls passed.
+- **Persistence:** Every denied write was followed by an authorised full-row read-back confirming unchanged stored data.
+- **Fixtures:** Submitted report `5f167653-786a-4ac1-8820-1ed1d597809f` was retained. Delete-control draft `adacb567-f019-4324-9193-19ac4430a505` was deleted successfully.
+- **Real-browser account switch — NOT TESTED in this run.** The Step 4.6 manual My drafts visibility check and the automated account-switch coverage with mocked Supabase remain separate evidence.

@@ -65,8 +65,9 @@ The course reference specifically gives us the streamText + tools + Zod inputSch
 - [X] 4.6 Implement draft editing.
 - [X] 4.7 Implement draft deletion.
 - [X] 4.8 Implement report submission.
-- [ ] 4.9 Verify that submitted report content becomes immutable as designed.
-- [ ] 4.10 Verify that another user cannot access or modify someone else's drafts.
+- [X] 4.9 Verify that submitted report content becomes immutable as designed.
+- [X] 4.10 Verify that another user cannot access or modify someone else's drafts.
+  - [ ] Manual browser follow-up: switch between linked accounts in the same browser and verify the previous author's cached draft list and editor content are absent.
 - [ ] 4.11 Implement the author's report overview for drafts and submitted/reviewed reports, including review/record status.
 **Milestone:** the principal human CRUD workflow works with React Query and ownership enforcement.
 
