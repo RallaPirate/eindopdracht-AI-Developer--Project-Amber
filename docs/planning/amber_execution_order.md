@@ -57,16 +57,17 @@ The course reference specifically gives us the streamText + tools + Zod inputSch
 
 ### 4. Specimens and report authoring
 
-- [ ] 4.1 Implement specimen listing/selection.
+- [X] 4.1 Implement specimen listing/selection.
 - [ ] 4.2 Implement Management specimen creation.
 - [ ] 4.3 Implement role-appropriate specimen updates: Senior and Management can update nickname, DOB, measurements, location and status, Management can update lysine protocol.
-- [ ] 4.4 Implement own-report draft listing.
-- [ ] 4.5 Implement report creation, including report type and species selection. Filter the specimen selector to specimens belonging to the selected species, and enforce the species–specimen match during creation and draft editing.
-- [ ] 4.6 Implement draft editing.
-- [ ] 4.7 Implement draft deletion.
-- [ ] 4.8 Implement report submission.
-- [ ] 4.9 Verify that submitted report content becomes immutable as designed.
-- [ ] 4.10 Verify that another user cannot access or modify someone else's drafts.
+- [X] 4.4 Implement own-report draft listing.
+- [X] 4.5 Implement report creation, including report type and species selection. Filter the specimen selector to specimens belonging to the selected species, and enforce the species–specimen match during creation and draft editing.
+- [X] 4.6 Implement draft editing.
+- [X] 4.7 Implement draft deletion.
+- [X] 4.8 Implement report submission.
+- [X] 4.9 Verify that submitted report content becomes immutable as designed.
+- [X] 4.10 Verify that another user cannot access or modify someone else's drafts.
+  - [ ] Manual browser follow-up: switch between linked accounts in the same browser and verify the previous author's cached draft list and editor content are absent.
 - [ ] 4.11 Implement the author's report overview for drafts and submitted/reviewed reports, including review/record status.
 **Milestone:** the principal human CRUD workflow works with React Query and ownership enforcement.
 

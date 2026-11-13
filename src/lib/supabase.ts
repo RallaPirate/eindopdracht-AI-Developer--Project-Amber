@@ -1,5 +1,6 @@
 import { createBrowserClient } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { fetchWithSupabaseDispatchGuard } from "./supabaseDispatchGuard";
 
 let browserClient: SupabaseClient | null = null;
 
@@ -44,6 +45,8 @@ export function getSupabaseBrowserClient(): SupabaseClient {
 
   const { url, publishableKey } = getSupabasePublicEnv();
   // createBrowserClient already singletons; we still cache for env-fail-once behaviour.
-  browserClient = createBrowserClient(url, publishableKey);
+  browserClient = createBrowserClient(url, publishableKey, {
+    global: { fetch: fetchWithSupabaseDispatchGuard },
+  });
   return browserClient;
 }

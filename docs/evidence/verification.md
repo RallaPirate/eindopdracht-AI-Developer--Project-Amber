@@ -184,14 +184,112 @@ KNOWN MINOR UI ISSUES
 4. Weather wording could use the reserve's fictional classification terminology while keeping representative offshore weather distinct from actual local conditions.
 [X] FIX MINOR UI ISSUES MENTIONED ABOVE
 REMAINING VERIFICATION
-[ ] Confirm live streaming and hosted RLS after deployment.
-[ ] Test Employee, Senior and Management access where accounts are available.
-[ ] Verify account isolation during active streaming if a reproducible test becomes practical.
-[ ] Confirm deployed Stop/error recovery and mobile/narrow-viewport presentation.
-[ ] Capture deployment URL, final screenshots and test evidence.
+Environment: Vercel production
+Date: 9 November 2026
+Deployment URL: https://project-amber-blond.vercel.app/
+Tested commit: main bee6e99026be3121b2c22e99b2c0590f9b28dbd3
+Deployment status: READY — verified through Vercel
+Production streaming: Assistant.exe sends and receives streamed responses successfully.
+[X] Species retrieval: Agent retrieves an existing species through the authenticated, RLS-scoped database client.
+[X] External weather retrieval: Agent successfully calls Open-Meteo and incorporates the forecast into its answer.
+[X] Combined reasoning: Agent uses species guidance and weather information together in an operational recommendation.
+[X] Role access: Verify Employee, Senior and Management accounts where available. All three should have the same permitted species read access.
+[X] Authentication and isolation: Verify that signed-out users cannot access the Assistant and that conversations do not persist between accounts.
+[X] Stop and recovery: Interrupt a response, confirm the interrupted state remains visible, and successfully send another message.
+[X] Evidence: Record the deployment URL, commit SHA, relevant screenshots and observed test results.
+
+Existing security evidence: Database RLS policies were verified during the database foundation work. Independent Assistant code review and automated tests confirmed authenticated, caller-scoped retrieval without service-role access.
+Deferred verification: Account switching during active streaming was not practical during local testing because responses completed too quickly. Automated session-isolation tests passed.
+
+Final production verdict: PENDING
+
 FINAL VERDICT
 Assistant MVP (local): PASS for principal functional tests; PASS for Stop/recovery; deployment verification pending.
 
 Observations: Species retrieval, Open-Meteo retrieval, multi-source reasoning, contextual follow-ups and basic session isolation passed in local browser tests. Cancellation exposed minor UI-state defects. Account switching during active streaming was not tested.
 
 Conclusion: The local Assistant MVP is functional and has passed the principal conversational, retrieval and basic session-isolation tests. Remaining issues concern deployment-specific verification gaps. Full Section 7 implementation is intentionally deferred.
+
+----
+### Step 4.6 — Report Draft Editing: Verification limitations
+
+**Date:** 11 November 2026  
+**Environment:** Local development
+
+**Independent review:** PASS after correction and independent reproduction of the stale-draft reopening and whitespace-only title defects.
+
+**Automated tests:** 72 DOM/authentication tests and 32 specimen/cache-isolation tests passed.
+
+**Manual observations:**
+- Cross-author draft isolation through My drafts: PASS — another user's drafts were not accessible through the UI.
+- Full network interruption: Authentication.exe suspended protected access. Unsaved editor inputs were lost.
+- Failed UPDATE with authentication remaining valid: NOT TESTED manually; automated regression coverage exists.
+- Direct cross-author and non-draft UPDATE denial: NOT TESTED live; RLS reviewed and denial behaviour mock-tested.
+- Specimen-linked editing: NOT TESTED live; no specimen fixtures available.
+
+**Conclusion:** Independent code review passed. The remaining negative-path verification gaps and offline editor behaviour are documented under REPORT-VERIFY-01 in `docs/planning/TODO.md`. These are deferred and do not independently invalidate the Step 4.6 code-review verdict.
+
+---
+
+### Step 4.7 — Report Draft Deletion: Verification
+
+**Date:** 11 November 2026  
+**Environment:** Local development  
+**Branch:** `feat/reports-authoring`  
+**Baseline commit:** `b9f253e37f5d6392191ef7ba27bac1dab66dc33d`
+
+**Independent review verdict:** PASS WITH NON-BLOCKING FINDINGS.
+
+#### Automated verification
+
+- Targeted independent re-review: **79 tests passed, 0 failed, 0 skipped**.
+- TypeScript (`--incremental false`): PASS.
+- Changed-file ESLint (without caching): PASS.
+- `git diff --check`: PASS.
+- Production build: PASSED during the initial implementation, as reported by Codex; **not independently rerun after the final transport-guard correction**.
+
+#### Security and correctness
+
+- Existing RLS permits hard deletion only of the author's own `draft/active` reports.
+- DELETE requests filter by report ID and both lifecycle statuses.
+- Zero-row, invalid and mismatched responses cannot confirm successful deletion.
+- Independent real-SDK transport tests verified that INSERT, UPDATE and DELETE do not dispatch after the originating verified access epoch ends.
+- The original dispatch race was reproduced by bypassing the new guard, confirming that the regression test detects the vulnerability.
+- An already-dispatched write may complete under its original identity; stale responses remain isolated from subsequent sessions.
+- Ownership and lifecycle denials were verified through code review and mocked tests, not direct live authenticated DELETE attempts.
+
+#### Manual browser smoke testing
+
+- [X] Confirmation cancellation preserves the draft.
+- [X] Confirmed deletion removes the draft and returns the editor to creation mode.
+- [X] Deleted drafts remain absent after closing/reopening Reports.exe or refreshing.
+- [X] Repeat with another linked test account, where practical.
+
+**Status:** PASS — record actual results after testing.
+
+#### Outstanding limitations
+
+Two non-blocking UI edge cases remain:
+
+1. A concurrent unavailable-detail response may hide pending deletion feedback.
+2. Closing and reopening Reports.exe during an in-flight deletion may leave the reopened editor showing an unavailable-draft message.
+
+Tracked as `REPORT-UI-02` in `docs/planning/TODO.md`.
+
+**Conclusion:** Step 4.7 passed independent code review after correction of the transport-dispatch race. The remaining UI observations are non-blocking. Final browser verification and commit details should be recorded after completion.
+
+---
+
+### Batch D — Steps 4.9 and 4.10
+
+**Date:** 12 November 2026
+
+**Environment:** Existing Project Amber Supabase project
+
+**Evidence:** Terminal output from the independently reviewed Batch D harness, using authenticated test sessions.
+
+- **4.9 Submitted report immutability — PASS (live direct API).** Submission and both permitted review-note saves returned HTTP 200 with one row each. Senior and Management audit and timestamp assertions passed. Author UPDATE and DELETE returned HTTP 200 with zero rows. Reviewer changes to species, specimen, report type, title and body, and reversion to draft, returned HTTP 400 with `P0001`. Changes to creator and creation time, and attempts to change or clear submission time, returned HTTP 403 with `42501`.
+- **4.10 Cross-author draft isolation — PASS (live direct API).** All nine cross-author SELECT, UPDATE and DELETE requests across Employee B, Senior and Management returned HTTP 200 with zero rows. The owner's create, read, edit and delete controls passed.
+- **Persistence:** Every denied write was followed by an authorised full-row read-back confirming unchanged stored data.
+- **Fixtures:** Submitted report `5f167653-786a-4ac1-8820-1ed1d597809f` was retained. Delete-control draft `adacb567-f019-4324-9193-19ac4430a505` was deleted successfully.
+- **Real-browser account switch — NOT TESTED in this run.** The Step 4.6 manual My drafts visibility check and the automated account-switch coverage with mocked Supabase remain separate evidence.

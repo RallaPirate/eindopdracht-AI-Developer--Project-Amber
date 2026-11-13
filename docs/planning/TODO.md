@@ -40,6 +40,40 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   - Verify after fixing: an accepted species appears immediately; rejected proposals do not alter the list; existing authentication-aware cache isolation remains intact.
   - **Priority:** Low — non-blocking usability defect. Defer until after the essential implementation milestones.
 
+  - [ ] **REPORT-UI-02 — Draft deletion feedback and editor recovery in uncommon navigation scenarios.**
+  - **Observed during:** Step 4.7 independent review, 11 November 2026.
+  - **Issue A:** If a concurrent detail query makes a draft unavailable while deletion is pending, the editor unmounts and can hide the pending or failure feedback.
+  - **Issue B:** If Reports.exe is closed during deletion and reopened before the operation completes, the original success callback is detached. The deleted draft is reconciled in the cache, but the reopened editor may display "This draft is no longer available" instead of automatically returning to creation mode.
+  - **Expected:** Deletion feedback remains visible when the draft detail becomes unavailable. A confirmed deletion leaves the interface in a consistent state, including after closing and reopening the window.
+  - **Verify after fixing:** Both scenarios recover correctly without stale drafts reappearing, duplicate deletion requests, or cross-session cache updates.
+  - **Priority:** Low — non-blocking UI edge cases. Defer until after essential implementation milestones.
+  - **Status:** Independent Step 4.7 review passed with these observations outstanding.
+
+[ ] **REPORT-UI-03 — Reconcile drafts after ambiguous submission responses** 
+
+**Applies to:** Step 4.8 — Report Submission  
+**Priority:** Low — non-blocking.
+
+If submission commits in Supabase but its response is lost or malformed, the application correctly withholds success feedback. However, My drafts may retain the cached entry until refetching.
+
+- [ ] Invalidate the authenticated draft-list and detail queries after an ambiguous submission outcome.
+- [ ] Do not automatically retry a potentially committed submission.
+- [ ] Verify that stale draft entries disappear without affecting other users' caches.
+
+[ ] **REPORT-CONCURRENCY-01 — Prevent stale draft edits from overwriting newer changes**
+
+**Applies to:** Step 4.6 — Draft Editing  
+**Priority:** Medium — non-blocking for Step 4.8.
+
+Unlike Step 4.8 submission, the existing Save changes mutation does not check the persisted `updated_at` version before updating.
+
+- [ ] Add an optimistic concurrency check to draft editing.
+- [ ] Reject stale Save changes attempts with clear conflict feedback.
+- [ ] Verify that concurrent edits in separate browser tabs cannot silently overwrite newer content.
+- [ ] Preserve existing draft editing, authentication and cache-isolation safeguards.
+
+**Status:** Deferred until after essential implementation milestones. Neither finding blocks Step 4.8 completion.
+
 ## Authentication improvements
 
 - [ ] **AUTH-01 — Session verification errors have no recovery UI.**
@@ -50,6 +84,21 @@ The locked `amber_execution_order.md` remains the authoritative implementation s
   - Do not grant desktop access without successful authentication.
   - Test using mocked authentication failures or controlled network failure scenarios.
   - Actual incident resolved after Supabase resumed.
+
+  ### REPORT-VERIFY-01 — Deferred live verification of report draft editing
+
+**Applies to:** Step 4.6 — Report Draft Editing.
+
+**Priority:** Low — deferred, non-blocking.
+
+- [ ] Test a failed report UPDATE while authentication remains verified. Confirm that unsaved inputs survive and retry succeeds.
+- [ ] Investigate the loss of unsaved editor input during full network disconnection. Coordinate with existing AUTH-01; do not weaken authentication or protected-data safeguards.
+- [X] Verify direct authenticated UPDATE denial for another author's draft and for submitted reports using disposable test records. Batch D confirmed unchanged stored rows after the denied writes on 12 November 2026.
+- [ ] Verify specimen-linked editing against live Supabase when a suitable fixture exists.
+
+**Background:** During local Step 4.6 testing on 11 November 2026, taking the browser fully offline caused Authentication.exe to suspend protected access and the editor's unsaved changes were lost. This did not isolate a failed UPDATE under an otherwise verified session. Cross-author draft visibility was checked through the UI, but direct unauthorised UPDATE attempts were not performed.
+
+**Completion criterion:** Outstanding scenarios are verified and recorded in `docs/evidence/verification.md`, with any confirmed defects addressed separately.
 
 ## Notes
 
